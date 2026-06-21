@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/floating_root"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+
+    <!-- 收起状态：圆形按钮 -->
+    <LinearLayout
+        android:id="@+id/floating_minimized"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:background="@drawable/floating_circle"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true">
+
+        <TextView
+            android:id="@+id/floating_mini_score"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:text="0.0" />
+    </LinearLayout>
+
+    <!-- 展开状态：完整窗口 -->
+    <LinearLayout
+        android:id="@+id/floating_expanded"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@drawable/floating_background"
+        android:padding="6dp">
+
+        <LinearLayout
+            android:id="@+id/floating_header"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="4dp">
+
+            <TextView
+                android:id="@+id/floating_grade"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="@color/floating_text"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:text="暂无评级" />
+
+            <Button
+                android:id="@+id/floating_collapse"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:background="@drawable/floating_collapse_btn"
+                android:text="−"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:padding="0dp"
+                android:gravity="center" />
+
+            <Button
+                android:id="@+id/floating_close"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:background="@drawable/floating_close_btn"
+                android:text="×"
+                android:textColor="#6B7280"
+                android:textSize="14sp"
+                android:padding="0dp"
+                android:gravity="center"
+                android:layout_marginStart="4dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/floating_detail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingHorizontal="8dp"
+            android:paddingBottom="6dp">
+
+            <TextView
+                android:id="@+id/floating_score"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:textColor="@color/primary"
+                android:textSize="26sp"
+                android:textStyle="bold"
+                android:text="0.0" />
+
+            <TextView
+                android:id="@+id/floating_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:textColor="@color/floating_text_secondary"
+                android:textSize="10sp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:text="LookGm" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>
