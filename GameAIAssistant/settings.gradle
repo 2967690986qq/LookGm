@@ -1,0 +1,29 @@
+// settings.gradle
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://jitpack.io' }
+    }
+}
+
+rootProject.name = "GameAIAssistant"
+include ':app'
+include ':common'
+include ':screenstream'
+include ':aiengine'
+
+// 定义项目路径
+project(':app').projectDir = new File('app')
+project(':common').projectDir = new File('common')
+project(':screenstream').projectDir = new File('screenstream')
+project(':aiengine').projectDir = new File('aiengine')

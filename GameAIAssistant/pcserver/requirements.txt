@@ -1,0 +1,12 @@
+# PC端服务依赖
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+aiohttp>=3.9.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# 可选依赖（根据使用的模型服务安装）
+# ollama: 无需额外包，安装ollama桌面版即可
+# vLLM: pip install vllm
+# LM Studio: 无需额外包，安装LM Studio桌面版即可

@@ -1,70 +1,51 @@
-# dependencies
-node_modules/
-
-# React Native
-.expo/
-dist/
-npm-debug.*
-*.jks
-*.p8
-*.p12
-*.key
-*.mobileprovision
-*.orig.*
-
-# iOS
-ios/Pods/
-ios/build/
-ios/*.xcworkspace
-ios/*.xcodeproj
-
-# Android
-android/app/build/
-android/build/
-android/gradle/wrapper/
-android/.gradle/
-
-# Metro
-.metro-health-check*
-
-# debug
-npm-debug.*
-yarn-debug.*
-yarn-error.*
-
-# macOS
-.DS_Store
-*.pem
-
-# local env files
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-yarn.lock
-
-# temporary files
-*.swp
-*.swo
-*~
-
-# IDE
+# Android/IDE
 .idea/
-.vscode/
+.gradle/
 *.iml
-
-# TypeScript
-*.tsbuildinfo
+local.properties
+*.log
+*.hprof
+/captures/
 
 # Build outputs
+build/
+app/build/
 *.apk
 *.aab
-*.app
-*.ipa
+*.dex
+*.class
+
+# Gradle
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Python venv / cache
+pcserver/venv/
+__pycache__/
+*.pyc
+
+# WorkBuddy project data
+.workbuddy/
+
+# Tools
+.tools/
+
+# Old React Native artifacts (to be removed)
+android/
+src/
+node_modules/
+*.js
+*.ts
+*.tsx
+app.json
+babel.config.js
+metro.config.js
+package.json
+package-lock.json
+tsconfig.json
