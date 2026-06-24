@@ -74,8 +74,7 @@ class FloatingWindowService : Service() {
     private var layoutVoiceMode: View? = null
     private var voicePulseDot: View? = null
     private var tvVoiceModeText: TextView? = null
-    private var tvVoiceUserText: TextView? = null
-    private var tvVoiceAiText: TextView? = null
+    private var tvVoiceCurText: TextView? = null
     private var btnMic: TextView? = null
 
     // === 面板控件 ===
@@ -305,7 +304,6 @@ class FloatingWindowService : Service() {
     private var isVoiceMode = false
 
     private val BALL_SIZE_DP = 52
-    private val VOICE_BALL_WIDTH_DP = 200
     private val PANEL_WIDTH_DP = 160
     private val SNAP_DURATION = 250L
     private val EXPAND_DURATION = 200L
@@ -447,8 +445,7 @@ class FloatingWindowService : Service() {
         layoutVoiceMode = ballView?.findViewById(R.id.layout_voice_mode)
         voicePulseDot = ballView?.findViewById(R.id.voice_pulse_dot)
         tvVoiceModeText = ballView?.findViewById(R.id.tv_voice_mode_text)
-        tvVoiceUserText = ballView?.findViewById(R.id.tv_voice_user_text)
-        tvVoiceAiText = ballView?.findViewById(R.id.tv_voice_ai_text)
+        tvVoiceCurText = ballView?.findViewById(R.id.tv_voice_cur_text)
 
         // 麦克风按钮 → 启动/停止语音对话
         btnMic = ballView?.findViewById(R.id.btn_mic)
@@ -989,15 +986,11 @@ class FloatingWindowService : Service() {
             val state = VoiceConversationEngine.state
 
             if (active) {
-                // === 进入语音模式 ===
+                // === 进入语音模式（不扩大球体，保持圆形） ===
                 if (!isVoiceMode) {
                     isVoiceMode = true
                     // 关闭面板
                     if (isExpanded) destroyPanel()
-                    // 切换到圆角矩形背景
-                    bgCircle?.setBackgroundResource(R.drawable.bg_floating_ball_voice)
-                    // 扩大球体
-                    setBallSize(VOICE_BALL_WIDTH_DP, WindowManager.LayoutParams.WRAP_CONTENT)
                 }
 
                 // 评分隐藏，语音显示
@@ -1008,28 +1001,24 @@ class FloatingWindowService : Service() {
                 // 状态文字
                 when (state) {
                     VoiceConversationEngine.State.LISTENING -> {
-                        tvVoiceModeText?.text = "聆听中"
+                        tvVoiceModeText?.text = "聆听"
                         tvVoiceModeText?.setTextColor(resources.getColor(R.color.accent_primary, null))
                         btnMic?.text = "⏹"
                         startPulseAnimation()
-                        // 回到聆听：清除上轮文字
-                        tvVoiceUserText?.visibility = View.GONE
-                        tvVoiceAiText?.visibility = View.GONE
+                        // 回到聆听：清除文字
+                        tvVoiceCurText?.visibility = View.GONE
                     }
                     VoiceConversationEngine.State.PROCESSING -> {
-                        tvVoiceModeText?.text = "思考中"
+                        tvVoiceModeText?.text = "思考"
                         tvVoiceModeText?.setTextColor(resources.getColor(R.color.accent_gold, null))
                         btnMic?.text = "⏳"
                         stopPulseAnimation()
-                        // 保留用户文字，清除旧AI回复
-                        tvVoiceAiText?.visibility = View.GONE
                     }
                     VoiceConversationEngine.State.SPEAKING -> {
-                        tvVoiceModeText?.text = "播报中"
+                        tvVoiceModeText?.text = "播报"
                         tvVoiceModeText?.setTextColor(resources.getColor(R.color.status_success, null))
                         btnMic?.text = "🔊"
                         stopPulseAnimation()
-                        // 保留AI回复
                     }
                     else -> {
                         tvVoiceModeText?.text = "就绪"
@@ -1040,13 +1029,7 @@ class FloatingWindowService : Service() {
                 }
             } else {
                 // === 退出语音模式 ===
-                if (isVoiceMode) {
-                    isVoiceMode = false
-                    // 恢复圆形背景
-                    bgCircle?.setBackgroundResource(R.drawable.bg_floating_ball)
-                    // 恢复球体大小
-                    setBallSize(BALL_SIZE_DP, BALL_SIZE_DP)
-                }
+                isVoiceMode = false
 
                 // 评分显示，语音隐藏
                 layoutScoreMode?.visibility = View.VISIBLE
@@ -1055,8 +1038,7 @@ class FloatingWindowService : Service() {
                 btnMic?.text = "🎤"
                 stopPulseAnimation()
                 // 清除语音文字
-                tvVoiceUserText?.visibility = View.GONE
-                tvVoiceAiText?.visibility = View.GONE
+                tvVoiceCurText?.visibility = View.GONE
 
                 // 恢复评分
                 refreshUI()
@@ -1124,23 +1106,22 @@ class FloatingWindowService : Service() {
         currentRms = 0f
     }
 
-    /** 更新球内语音对话文字（只显示当前内容，不记录历史） */
+    /** 更新球内语音对话文字（只显示当前轮简短摘要，不记录历史） */
     private fun updateBallVoiceText(role: String, text: String) {
         mainHandler.post {
+            val short = if (text.length > 10) text.substring(0, 10) + "…" else text
             when (role) {
                 "user" -> {
-                    tvVoiceUserText?.text = "👤 $text"
-                    tvVoiceUserText?.visibility = View.VISIBLE
-                    tvVoiceAiText?.visibility = View.GONE
+                    tvVoiceCurText?.text = short
+                    tvVoiceCurText?.visibility = View.VISIBLE
                 }
                 "assistant" -> {
-                    tvVoiceAiText?.text = "🤖 $text"
-                    tvVoiceAiText?.visibility = View.VISIBLE
-                    tvVoiceUserText?.visibility = View.GONE
+                    tvVoiceCurText?.text = short
+                    tvVoiceCurText?.visibility = View.VISIBLE
                 }
                 "system" -> {
-                    tvVoiceAiText?.text = text
-                    tvVoiceAiText?.visibility = View.VISIBLE
+                    tvVoiceCurText?.text = text.take(14)
+                    tvVoiceCurText?.visibility = View.VISIBLE
                 }
             }
         }

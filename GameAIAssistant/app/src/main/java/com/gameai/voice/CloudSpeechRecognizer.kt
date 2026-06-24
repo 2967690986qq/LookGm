@@ -65,9 +65,9 @@ class CloudSpeechRecognizer(
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private val recordingThread = Thread {
-        processAudioLoop()
-    }
+    private var currentThread: Thread? = null
+
+    // 每次 startListening 创建新线程（Thread 只能 start 一次）
 
     fun startListening() {
         // 检查录音权限
@@ -112,8 +112,10 @@ class CloudSpeechRecognizer(
                 Log.d(TAG, "云端语音识别已启动")
             }
 
-            // 启动录音处理线程
-            recordingThread.start()
+            // 启动录音处理线程（每次新建，Thread 只能 start 一次）
+            currentThread = Thread {
+                processAudioLoop()
+            }.apply { start() }
 
             // 最长录音保护
             mainHandler.postDelayed({
@@ -424,6 +426,10 @@ class CloudSpeechRecognizer(
         mainHandler.removeCallbacksAndMessages(null)
         silenceTimer?.let { mainHandler.removeCallbacks(it) }
         silenceTimer = null
+
+        // 中断录音线程
+        currentThread?.interrupt()
+        currentThread = null
 
         try {
             audioRecord?.stop()
