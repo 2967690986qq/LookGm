@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 面板内嵌子卡片 — 半透明暗底 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#9949505E" />
+    <corners android:radius="6dp" />
+</shape>

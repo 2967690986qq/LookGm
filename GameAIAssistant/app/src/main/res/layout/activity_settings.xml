@@ -1,0 +1,739 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0D0D1A">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- ===== 标题栏 ===== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:id="@+id/btn_back"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="&lt; 返回"
+                android:textColor="#7C6FF7"
+                android:textSize="14sp"
+                android:padding="8dp"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="模型与连接配置"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:gravity="center" />
+
+            <TextView
+                android:id="@+id/btn_save"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="保存"
+                android:textColor="#00E5FF"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:padding="8dp"
+                android:clickable="true"
+                android:focusable="true" />
+        </LinearLayout>
+
+        <!-- ===== PC服务器配置 ===== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="▎PC 服务器"
+            android:textColor="#7C6FF7"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="14dp"
+            android:background="@drawable/settings_card_bg"
+            android:layout_marginBottom="14dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="IP 地址"
+                android:textColor="#8A8A9A"
+                android:textSize="11sp" />
+            <EditText
+                android:id="@+id/et_host"
+                android:layout_width="match_parent"
+                android:layout_height="42dp"
+                android:text="192.168.1.100"
+                android:textColor="#E8E8F0"
+                android:textSize="14sp"
+                android:background="@null"
+                android:inputType="text"
+                android:paddingHorizontal="4dp"
+                android:hint="PC内网IP地址"
+                android:textColorHint="#444455" />
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="端口"
+                android:textColor="#8A8A9A"
+                android:textSize="11sp" />
+            <EditText
+                android:id="@+id/et_port"
+                android:layout_width="match_parent"
+                android:layout_height="42dp"
+                android:text="8765"
+                android:textColor="#E8E8F0"
+                android:textSize="14sp"
+                android:background="@null"
+                android:inputType="number"
+                android:paddingHorizontal="4dp" />
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+            <TextView
+                android:id="@+id/btn_test_server"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:gravity="center"
+                android:text="🔍 测试PC服务器连接"
+                android:textColor="#00E5FF"
+                android:textSize="13sp"
+                android:background="@drawable/settings_btn_bg"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <TextView
+                android:id="@+id/tv_server_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="#8A8A9A"
+                android:textSize="11sp"
+                android:gravity="center"
+                android:layout_marginTop="6dp" />
+        </LinearLayout>
+
+        <!-- ===== 模型模式选择 ===== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="▎AI 模型模式"
+            android:textColor="#7C6FF7"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="14dp"
+            android:background="@drawable/settings_card_bg"
+            android:layout_marginBottom="14dp">
+
+            <!-- 模式切换按钮组 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:orientation="horizontal"
+                android:gravity="center">
+
+                <TextView
+                    android:id="@+id/btn_mode_cloud"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:gravity="center"
+                    android:text="☁ 云端"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/mode_tab_active"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/btn_mode_local"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:gravity="center"
+                    android:text="🏠 内网"
+                    android:textColor="#8A8A9A"
+                    android:textSize="12sp"
+                    android:background="@drawable/mode_tab_inactive"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:layout_marginHorizontal="4dp" />
+
+                <TextView
+                    android:id="@+id/btn_mode_custom"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:gravity="center"
+                    android:text="⚙ 自定义"
+                    android:textColor="#8A8A9A"
+                    android:textSize="12sp"
+                    android:background="@drawable/mode_tab_inactive"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="10dp" />
+
+            <!-- 游戏选择 -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="游戏"
+                android:textColor="#8A8A9A"
+                android:textSize="11sp" />
+            <Spinner
+                android:id="@+id/spinner_game"
+                android:layout_width="match_parent"
+                android:layout_height="42dp"
+                android:background="@null"
+                android:spinnerMode="dropdown"
+                android:popupBackground="#1E1E30" />
+        </LinearLayout>
+
+        <!-- ===== 云端模型配置区 ===== -->
+        <LinearLayout
+            android:id="@+id/layout_cloud_config"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="▎云端供应商"
+                android:textColor="#7C6FF7"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp"
+                android:background="@drawable/settings_card_bg"
+                android:layout_marginBottom="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="供应商"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <Spinner
+                    android:id="@+id/spinner_provider"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:background="@null"
+                    android:spinnerMode="dropdown"
+                    android:popupBackground="#1E1E30" />
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="API Key"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_api_key"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text=""
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="textPassword"
+                    android:paddingHorizontal="4dp"
+                    android:hint="sk-..."
+                    android:textColorHint="#444455" />
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="API 地址"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_base_url"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="https://api.openai.com/v1"
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="textUri"
+                    android:paddingHorizontal="4dp"
+                    android:hint="https://api.xxx.com/v1"
+                    android:textColorHint="#444455" />
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="模型名称"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_model_name"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="gpt-4o"
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="text"
+                    android:paddingHorizontal="4dp" />
+
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="10dp" />
+
+                <TextView
+                    android:id="@+id/btn_test_model"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:gravity="center"
+                    android:text="🔗 测试模型连通性"
+                    android:textColor="#00E5FF"
+                    android:textSize="13sp"
+                    android:background="@drawable/settings_btn_bg"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/tv_model_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp"
+                    android:gravity="center"
+                    android:layout_marginTop="6dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ===== 本地/内网模型配置区 ===== -->
+        <LinearLayout
+            android:id="@+id/layout_local_config"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="▎本地模型服务"
+                android:textColor="#7C6FF7"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp"
+                android:background="@drawable/settings_card_bg"
+                android:layout_marginBottom="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="模型服务"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <Spinner
+                    android:id="@+id/spinner_local_service"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:background="@null"
+                    android:spinnerMode="dropdown"
+                    android:popupBackground="#1E1E30" />
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="主机 IP"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_local_host"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="192.168.1.100"
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="text"
+                    android:paddingHorizontal="4dp"
+                    android:hint="PC内网IP"
+                    android:textColorHint="#444455" />
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="端口"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_local_port"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="11434"
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="number"
+                    android:paddingHorizontal="4dp"
+                    android:hint="默认: Ollama=11434, vLLM=8000, LM Studio=1234"
+                    android:textColorHint="#444455" />
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="模型名称"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_local_model"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text="qwen2.5:7b"
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="text"
+                    android:paddingHorizontal="4dp"
+                    android:hint="如: qwen2.5:7b, Qwen2.5-VL-7B-Instruct"
+                    android:textColorHint="#444455" />
+
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="10dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center">
+
+                    <TextView
+                        android:id="@+id/btn_test_local"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:text="🔗 测试模型"
+                        android:textColor="#00E5FF"
+                        android:textSize="13sp"
+                        android:background="@drawable/settings_btn_bg"
+                        android:clickable="true"
+                        android:focusable="true" />
+
+                    <TextView
+                        android:id="@+id/btn_start_pc_guide"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:text="📖 启动指南"
+                        android:textColor="#FFD700"
+                        android:textSize="13sp"
+                        android:background="@drawable/settings_btn_bg"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:layout_marginStart="8dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tv_local_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp"
+                    android:gravity="center"
+                    android:layout_marginTop="6dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ===== 自定义接口配置区 ===== -->
+        <LinearLayout
+            android:id="@+id/layout_custom_config"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="▎自定义兼容接口"
+                android:textColor="#7C6FF7"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp"
+                android:background="@drawable/settings_card_bg"
+                android:layout_marginBottom="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="API 地址 (OpenAI兼容)"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_custom_base_url"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text=""
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="textUri"
+                    android:paddingHorizontal="4dp"
+                    android:hint="如: http://192.168.1.100:8080/v1"
+                    android:textColorHint="#444455" />
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="API Key (选填)"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_custom_api_key"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text=""
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="textPassword"
+                    android:paddingHorizontal="4dp"
+                    android:hint="如 OneAPI 的 Key"
+                    android:textColorHint="#444455" />
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="模型名称"
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp" />
+                <EditText
+                    android:id="@+id/et_custom_model_name"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:text=""
+                    android:textColor="#E8E8F0"
+                    android:textSize="13sp"
+                    android:background="@null"
+                    android:inputType="text"
+                    android:paddingHorizontal="4dp"
+                    android:hint="gpt-4o / claude-3 / 任意模型名"
+                    android:textColorHint="#444455" />
+
+                <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="10dp" />
+
+                <TextView
+                    android:id="@+id/btn_test_custom"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:gravity="center"
+                    android:text="🔗 测试连接"
+                    android:textColor="#00E5FF"
+                    android:textSize="13sp"
+                    android:background="@drawable/settings_btn_bg"
+                    android:clickable="true"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/tv_custom_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textColor="#8A8A9A"
+                    android:textSize="11sp"
+                    android:gravity="center"
+                    android:layout_marginTop="6dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ===== 功能开关 ===== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="▎功能与采集"
+            android:textColor="#7C6FF7"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="14dp"
+            android:background="@drawable/settings_card_bg"
+            android:layout_marginBottom="14dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:text="语音播报" android:textColor="#E8E8F0" android:textSize="14sp" />
+                <Switch
+                    android:id="@+id/switch_voice"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:checked="true" />
+            </LinearLayout>
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:text="悬浮窗" android:textColor="#E8E8F0" android:textSize="14sp" />
+                <Switch
+                    android:id="@+id/switch_floating_ball"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:checked="true" />
+            </LinearLayout>
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:text="开机自启" android:textColor="#E8E8F0" android:textSize="14sp" />
+                <Switch
+                    android:id="@+id/switch_auto_start"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content" />
+            </LinearLayout>
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="采集帧率" android:textColor="#8A8A9A" android:textSize="11sp" />
+            <LinearLayout
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:gravity="center_vertical">
+                <SeekBar
+                    android:id="@+id/seekbar_fps"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:max="29" android:progress="9" />
+                <TextView
+                    android:id="@+id/tv_fps_value"
+                    android:layout_width="56dp" android:layout_height="wrap_content"
+                    android:text="10 fps" android:textColor="#00E5FF" android:textSize="12sp" android:gravity="end" />
+            </LinearLayout>
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="JPEG 质量" android:textColor="#8A8A9A" android:textSize="11sp" />
+            <LinearLayout
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:gravity="center_vertical">
+                <SeekBar
+                    android:id="@+id/seekbar_quality"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:max="100" android:progress="60" />
+                <TextView
+                    android:id="@+id/tv_quality_value"
+                    android:layout_width="56dp" android:layout_height="wrap_content"
+                    android:text="60%" android:textColor="#00E5FF" android:textSize="12sp" android:gravity="end" />
+            </LinearLayout>
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#1A1A2E" android:layout_marginVertical="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="悬浮窗透明度" android:textColor="#8A8A9A" android:textSize="11sp" />
+            <LinearLayout
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:gravity="center_vertical">
+                <SeekBar
+                    android:id="@+id/seekbar_alpha"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:max="100" android:progress="80" />
+                <TextView
+                    android:id="@+id/tv_alpha_value"
+                    android:layout_width="56dp" android:layout_height="wrap_content"
+                    android:text="80%" android:textColor="#00E5FF" android:textSize="12sp" android:gravity="end" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ===== 底部操作 ===== -->
+        <TextView
+            android:id="@+id/btn_clear_history"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:gravity="center"
+            android:text="🗑 清空对局历史"
+            android:textColor="#FF5252"
+            android:textSize="13sp"
+            android:background="@drawable/settings_card_bg"
+            android:layout_marginBottom="8dp"
+            android:clickable="true"
+            android:focusable="true" />
+
+        <TextView
+            android:id="@+id/btn_about"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:gravity="center"
+            android:text="ℹ 关于"
+            android:textColor="#8A8A9A"
+            android:textSize="13sp"
+            android:background="@drawable/settings_card_bg"
+            android:layout_marginBottom="32dp"
+            android:clickable="true"
+            android:focusable="true" />
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- APK 下载目录 -->
+    <external-files-path
+        name="apk_downloads"
+        path="updates/" />
+    <!-- 缓存目录备用 -->
+    <cache-path
+        name="cached_apks"
+        path="updates/" />
+</paths>

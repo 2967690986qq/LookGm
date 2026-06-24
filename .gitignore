@@ -37,8 +37,8 @@ __pycache__/
 .tools/
 
 # Old React Native artifacts (to be removed)
-android/
-src/
+/android/
+/src/
 node_modules/
 *.js
 *.ts

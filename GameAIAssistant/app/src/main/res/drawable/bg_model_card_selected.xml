@@ -1,0 +1,6 @@
+<!-- 模型卡片选中 — 暗底+青色霓虹光环 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#0A1620" />
+    <corners android:radius="14dp" />
+    <stroke android:width="2dp" android:color="@color/accent_primary" />
+</shape>

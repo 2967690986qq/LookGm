@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ═══════════════════════════════════════════
+         电竞暗色主题 · 色彩体系
+         基调：深蓝紫黑 + 青色霓虹 + 金色高光
+         ═══════════════════════════════════════════ -->
+
+    <!-- 背景层级 — 从最深到最浅 -->
+    <color name="bg_primary">#080C1A</color>      <!-- 页面背景：极深蓝黑 -->
+    <color name="bg_secondary">#0E1224</color>     <!-- 次级背景 -->
+    <color name="bg_card">#141A30</color>           <!-- 卡片表面：深蓝灰 -->
+    <color name="bg_card_hover">#1A2240</color>    <!-- 卡片悬停 -->
+    <color name="bg_input">#1A2240</color>          <!-- 输入框背景 -->
+    <color name="bg_nav">#0A0E1E</color>            <!-- 导航栏：更深 -->
+
+    <!-- 文字 — 暗底高对比 -->
+    <color name="text_primary">#E8ECF1</color>      <!-- 主文字：近白 -->
+    <color name="text_secondary">#8790A5</color>    <!-- 次文字：蓝灰 -->
+    <color name="text_hint">#505A6E</color>         <!-- 提示：暗蓝灰 -->
+    <color name="text_disabled">#343B4E</color>     <!-- 禁用 -->
+
+    <!-- 强调色 — 霓虹色系 -->
+    <color name="accent_primary">#00E5FF</color>    <!-- 主强调：青色霓虹 -->
+    <color name="accent_primary_dark">#00BCD4</color>
+    <color name="accent_light">#80F0FF</color>      <!-- 浅青 -->
+    <color name="accent_bg">#0A1A20</color>         <!-- 青色背景 -->
+
+    <color name="accent_purple">#7C3AED</color>     <!-- 紫霓虹 -->
+    <color name="accent_purple_light">#A78BFA</color>
+    <color name="accent_gold">#FFD700</color>       <!-- 金色高光 -->
+    <color name="accent_gold_dark">#B8960F</color>
+
+    <!-- 状态色 — 霓虹变体 -->
+    <color name="status_success">#00E676</color>    <!-- 成功绿 -->
+    <color name="status_error">#FF5252</color>      <!-- 错误红 -->
+    <color name="status_warning">#FFB74D</color>    <!-- 警告橙 -->
+    <color name="status_info">#00E5FF</color>       <!-- 信息青 -->
+
+    <!-- 分割线 / 边框 — 极暗 -->
+    <color name="divider">#1C2540</color>
+    <color name="border">#242E4A</color>
+
+    <!-- 评分等级 — 电竞四段位 -->
+    <color name="grade_s">#FFD700</color>           <!-- S级：金色 -->
+    <color name="grade_a">#FF5252</color>           <!-- A级：红霓虹 -->
+    <color name="grade_b">#7C3AED</color>           <!-- B级：紫霓虹 -->
+    <color name="grade_c">#00E5FF</color>           <!-- C级：青霓虹 -->
+    <color name="grade_d">#505A6E</color>           <!-- D级：暗灰 -->
+
+    <!-- 等级快捷名称 -->
+    <color name="gold">#FFD700</color>
+    <color name="orange">#FFB74D</color>
+    <color name="green">#00E676</color>
+    <color name="blue">#00E5FF</color>
+    <color name="purple">#7C3AED</color>
+</resources>

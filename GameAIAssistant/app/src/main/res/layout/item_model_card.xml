@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:background="@drawable/bg_model_card"
+    android:paddingStart="14dp"
+    android:paddingEnd="14dp"
+    android:paddingTop="12dp"
+    android:paddingBottom="12dp"
+    android:layout_marginBottom="8dp"
+    android:gravity="center_vertical">
+
+    <!-- 左侧色条 -->
+    <View
+        android:id="@+id/view_accent"
+        android:layout_width="3dp"
+        android:layout_height="20dp"
+        android:layout_marginEnd="12dp" />
+
+    <!-- 模型名 -->
+    <TextView
+        android:id="@+id/tv_model_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:textSize="14sp"
+        android:textColor="@color/text_primary"
+        android:typeface="monospace" />
+
+    <!-- 选中图标 -->
+    <TextView
+        android:id="@+id/tv_check"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:gravity="center"
+        android:text="✓"
+        android:textSize="16sp"
+        android:textColor="@color/accent_primary"
+        android:textStyle="bold"
+        android:visibility="gone"
+        android:background="@drawable/bg_chip_selected" />
+</LinearLayout>

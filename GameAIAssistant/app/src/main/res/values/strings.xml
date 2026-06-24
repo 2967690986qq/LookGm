@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LookGm</string>
+
+    <!-- 登录 -->
+    <string name="login_title">欢迎使用 LookGm</string>
+    <string name="login_subtitle">游戏AI视觉助手</string>
+    <string name="login_username">用户名</string>
+    <string name="login_password">密码</string>
+    <string name="login_btn">登 录</string>
+    <string name="login_skip">跳过登录</string>
+
+    <!-- 导航 -->
+    <string name="nav_models">模型</string>
+    <string name="nav_dashboard">仪表盘</string>
+    <string name="nav_profile">我的</string>
+
+    <!-- 仪表盘 -->
+    <string name="dashboard_title">实时对局</string>
+    <string name="dashboard_no_game">等待对局开始...</string>
+    <string name="dashboard_score">综合评分</string>
+    <string name="dashboard_grade">评级</string>
+    <string name="start_capture">开始辅助</string>
+    <string name="stop_capture">停止辅助</string>
+    <string name="simulate_score">模拟评分</string>
+    <string name="simulate_end">模拟结束</string>
+
+    <!-- 模型 -->
+    <string name="model_title">模型配置</string>
+    <string name="model_provider">供应商</string>
+    <string name="model_api_key">API Key</string>
+    <string name="model_api_key_hint">请输入 API Key</string>
+    <string name="model_base_url">接口地址</string>
+    <string name="model_name">模型名称</string>
+    <string name="model_name_hint">选择或输入模型名</string>
+    <string name="model_fetch">获取模型列表</string>
+    <string name="model_test">测试连接</string>
+    <string name="model_save">保存配置</string>
+    <string name="model_testing">测试中...</string>
+    <string name="model_test_ok">连接成功 %dms</string>
+    <string name="model_test_fail">连接失败</string>
+    <string name="model_fetching">获取中...</string>
+    <string name="model_no_models">未获取到模型列表</string>
+
+    <!-- 我的 -->
+    <string name="profile_title">我的</string>
+    <string name="profile_logout">退出登录</string>
+    <string name="profile_about">关于</string>
+    <string name="profile_version">版本</string>
+    <string name="profile_voice">语音播报</string>
+    <string name="profile_overlay">悬浮窗</string>
+
+    <!-- 通用 -->
+    <string name="btn_back">返回</string>
+    <string name="btn_confirm">确认</string>
+    <string name="btn_cancel">取消</string>
+    <string name="no_data">暂无数据</string>
+    <string name="connected">已连接</string>
+    <string name="disconnected">未连接</string>
+    <string name="recording">采集中</string>
+    <string name="stopped">已停止</string>
+</resources>

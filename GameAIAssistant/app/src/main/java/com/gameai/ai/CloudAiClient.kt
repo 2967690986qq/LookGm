@@ -1,0 +1,283 @@
+// CloudAiClient.kt - OpenAI/Claude 兼容 API 客户端
+package com.gameai.ai
+
+import android.graphics.Bitmap
+import android.util.Base64
+import com.gameai.model.ProviderConfig
+import kotlinx.coroutines.*
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+
+/**
+ * 云端 AI API 客户端，支持 OpenAI / Claude / DeepSeek / 通义千问 等
+ * 全部兼容 OpenAI Chat Completions 格式
+ *
+ * 并发安全：全局 ReentrantLock 防止多个协程同时调用 API
+ * 双模型支持：语音对话和分析可分别配置不同模型
+ */
+object CloudAiClient {
+
+    private const val TAG = "CloudAiClient"
+    private const val TIMEOUT_SECONDS = 30L
+
+    /** 全局并发锁：确保同一时间只发起一个 API 请求，避免 token 混用和 429 限流 */
+    private val apiLock = ReentrantLock()
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .writeTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
+
+    private val JSON = "application/json; charset=utf-8".toMediaType()
+
+    /**
+     * 同步调用 AI 接口分析游戏画面（在后台线程中调用）
+     * @param bitmap 当前屏幕截图
+     * @param config 模型配置（apiKey, baseUrl, modelName）
+     * @param systemPrompt 系统提示词
+     * @return 分析文本，失败返回 null
+     */
+    suspend fun analyze(bitmap: Bitmap, config: ProviderConfig, systemPrompt: String): String? {
+        return withContext(Dispatchers.IO) {
+            apiLock.lock()
+            try {
+                val base64Image = bitmapToBase64(bitmap)
+                val requestBody = buildRequestBody(config.modelName, systemPrompt, base64Image)
+                val response = callApi(config, requestBody)
+                parseResponse(response)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            } finally {
+                apiLock.unlock()
+            }
+        }
+    }
+
+    /**
+     * 多轮语音对话（豆包模式）— 支持历史上下文 + 截图 + 语音转文字
+     * @param bitmap 当前屏幕截图（可为 null）
+     * @param config 模型配置
+     * @param userMessage 用户语音转文字
+     * @param history 历史对话记录
+     * @return AI 口语化回复，失败返回 null
+     */
+    suspend fun converse(
+        bitmap: Bitmap?,
+        config: ProviderConfig,
+        userMessage: String
+    ): String? {
+        return withContext(Dispatchers.IO) {
+            apiLock.lock()
+            try {
+                val requestBody = buildConversationBody(config.modelName, userMessage, bitmap)
+                val response = callApi(config, requestBody)
+                parseResponse(response)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            } finally {
+                apiLock.unlock()
+            }
+        }
+    }
+
+    // ============================================================
+    //  API 调用
+    // ============================================================
+
+    private fun callApi(config: ProviderConfig, body: String): String? {
+        val url = normalizeApiUrl(config.baseUrl) + "/chat/completions"
+        val requestBody = body.toRequestBody(JSON)
+
+        val builder = Request.Builder()
+            .url(url)
+            .post(requestBody)
+            .addHeader("Content-Type", "application/json")
+
+        // 根据供应商设置不同的鉴权头
+        when {
+            config.apiKey.isNotEmpty() -> {
+                builder.addHeader("Authorization", "Bearer ${config.apiKey}")
+            }
+        }
+
+        val request = builder.build()
+        val call = client.newCall(request)
+
+        return try {
+            val response = call.execute()
+            if (response.isSuccessful) {
+                response.body?.string()
+            } else {
+                val errorBody = response.body?.string() ?: ""
+                android.util.Log.w(TAG, "API error ${response.code}: $errorBody")
+                null
+            }
+        } catch (e: IOException) {
+            android.util.Log.e(TAG, "API call failed", e)
+            null
+        }
+    }
+
+    // ============================================================
+    //  请求构建
+    // ============================================================
+
+    private fun buildRequestBody(model: String, systemPrompt: String, base64Image: String): String {
+        val messages = JSONArray()
+
+        // System message
+        messages.put(JSONObject().apply {
+            put("role", "system")
+            put("content", systemPrompt)
+        })
+
+        // User message with image
+        val userContent = JSONArray()
+        userContent.put(JSONObject().apply {
+            put("type", "image_url")
+            put("image_url", JSONObject().apply {
+                put("url", "data:image/jpeg;base64,$base64Image")
+                put("detail", "low")  // 低细节模式，更快更省 token
+            })
+        })
+        userContent.put(JSONObject().apply {
+            put("type", "text")
+            put("text", "分析当前画面，给出简洁的战术建议。")
+        })
+
+        messages.put(JSONObject().apply {
+            put("role", "user")
+            put("content", userContent)
+        })
+
+        return JSONObject().apply {
+            put("model", model)
+            put("messages", messages)
+            put("max_tokens", 150)
+            put("temperature", 0.3)
+        }.toString()
+    }
+
+    /**
+     * 构建语音对话请求体（多轮上下文 + 截图 + 语音文字）
+     */
+    private fun buildConversationBody(
+        model: String,
+        userMessage: String,
+        bitmap: Bitmap?
+    ): String {
+        val messages = JSONArray()
+
+        // System message — 口语化助手角色
+        messages.put(JSONObject().apply {
+            put("role", "system")
+            put("content", """
+你是一个游戏语音助手，名叫"小G"。你正在通过语音和玩家对话。玩家在玩王者荣耀，你能看到他的手机屏幕。
+
+说话要求：
+1. 使用口语化中文，像朋友聊天一样自然
+2. 回复简洁，控制在 2-4 句话（约 30-80 字）
+3. 基于看到的屏幕画面给出建议
+4. 如果玩家问战术问题，给出具体可操作的建议
+5. 语气轻松友好，适当使用语气词（"哦""呢""吧"）
+6. 不要使用任何格式标记（不用markdown、不用编号）
+
+你的能力：
+- 能看到玩家屏幕上的游戏画面
+- 可以分析局势、阵容、装备、小地图
+- 给出实时战术指导
+""".trimIndent())
+        })
+
+        // 当前用户消息（含截图）
+        if (bitmap != null) {
+            val base64Image = bitmapToBase64(bitmap)
+            val userContent = JSONArray()
+            userContent.put(JSONObject().apply {
+                put("type", "image_url")
+                put("image_url", JSONObject().apply {
+                    put("url", "data:image/jpeg;base64,$base64Image")
+                    put("detail", "low")
+                })
+            })
+            userContent.put(JSONObject().apply {
+                put("type", "text")
+                put("text", userMessage)
+            })
+            messages.put(JSONObject().apply {
+                put("role", "user")
+                put("content", userContent)
+            })
+        } else {
+            messages.put(JSONObject().apply {
+                put("role", "user")
+                put("content", userMessage)
+            })
+        }
+
+        return JSONObject().apply {
+            put("model", model)
+            put("messages", messages)
+            put("max_tokens", 200)
+            put("temperature", 0.7)
+        }.toString()
+    }
+
+    // ============================================================
+    //  响应解析
+    // ============================================================
+
+    private fun parseResponse(body: String?): String? {
+        if (body.isNullOrBlank()) return null
+        return try {
+            val json = JSONObject(body)
+            val choices = json.getJSONArray("choices")
+            if (choices.length() > 0) {
+                val message = choices.getJSONObject(0).getJSONObject("message")
+                message.getString("content")?.trim()
+            } else null
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Parse error", e)
+            null
+        }
+    }
+
+    // ============================================================
+    //  工具方法
+    // ============================================================
+
+    /** Bitmap → Base64 JPEG（低质量、小尺寸，减少 token 消耗）*/
+    private fun bitmapToBase64(bitmap: Bitmap): String {
+        // 缩放到 512px 宽以节省 token
+        val scaleWidth = 512
+        val scaleHeight = (bitmap.height.toFloat() / bitmap.width * scaleWidth).toInt()
+        val scaled = Bitmap.createScaledBitmap(bitmap, scaleWidth, scaleHeight, true)
+
+        val bos = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 50, bos)
+        val bytes = bos.toByteArray()
+        bos.close()
+
+        if (scaled != bitmap) scaled.recycle()
+
+        return Base64.encodeToString(bytes, Base64.NO_WRAP)
+    }
+
+    /** 标准化 API 地址：去掉尾部斜杠和 /v1 */
+    private fun normalizeApiUrl(url: String): String {
+        return url.trimEnd('/').let {
+            // 部分供应商已在 baseUrl 中包含 /v1
+            if (it.endsWith("/v1")) it.removeSuffix("/v1") else it
+        }.let { it + "/v1" }
+    }
+}
