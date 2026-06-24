@@ -41,7 +41,7 @@ object UpdateManager {
 
     // ===== 配置项 =====
     // 替换为实际 GitHub 仓库，例如 "your-github-username/GameAIAssistant"
-    private const val GITHUB_REPO = "LookGm/LookGm"
+    private const val GITHUB_REPO = "2967690986qq/LookGm"
     private const val GITHUB_RELEASES_API = "https://api.github.com/repos/$GITHUB_REPO/releases"
     private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L  // 6小时检测一次
 

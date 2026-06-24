@@ -307,7 +307,7 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
         // 开源 GitHub
         binding.btnGithub.setOnClickListener {
             val intent = Intent(Intent.ACTION_VIEW,
-                Uri.parse("https://github.com/LookGm/LookGm"))
+                Uri.parse("https://github.com/2967690986qq/LookGm"))
             startActivity(intent)
         }
 
