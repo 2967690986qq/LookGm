@@ -188,8 +188,8 @@ class SettingsActivity : AppCompatActivity() {
 
         // 游戏
         val gameNames = com.gameai.common.constants.GameConstants.SUPPORTED_GAMES.keys.toList()
-        val gameAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, gameNames).also {
-            it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        val gameAdapter = ArrayAdapter(this, R.layout.item_spinner_selected, gameNames).also {
+            it.setDropDownViewResource(R.layout.item_spinner_dropdown)
         }
         spinnerGame.adapter = gameAdapter
         val gameIdx = gameNames.indexOf(currentConfig.gameName)
@@ -198,8 +198,8 @@ class SettingsActivity : AppCompatActivity() {
         // 云端供应商
         val cloudProviders = ModelProvider.entries.filter { !it.isLocal && it != ModelProvider.CUSTOM }
         val providerNames = cloudProviders.map { "${it.displayName} (${it.defaultModel})" }
-        val providerAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, providerNames).also {
-            it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        val providerAdapter = ArrayAdapter(this, R.layout.item_spinner_selected, providerNames).also {
+            it.setDropDownViewResource(R.layout.item_spinner_dropdown)
         }
         spinnerProvider.adapter = providerAdapter
         val providerIdx = cloudProviders.indexOfFirst { it == currentConfig.currentProvider }
@@ -217,8 +217,8 @@ class SettingsActivity : AppCompatActivity() {
             "vLLM (端口8000)",
             "LM Studio (端口1234)"
         )
-        val localAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, localServices).also {
-            it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        val localAdapter = ArrayAdapter(this, R.layout.item_spinner_selected, localServices).also {
+            it.setDropDownViewResource(R.layout.item_spinner_dropdown)
         }
         spinnerLocalService.adapter = localAdapter
         etLocalHost.setText(currentConfig.localModelHost)

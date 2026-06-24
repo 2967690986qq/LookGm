@@ -1,14 +1,40 @@
-// ModelProvider.kt - 多供应商模型配置系统
+// ModelProvider.kt - 多供应商多模型绑定系统
 package com.gameai.model
+
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * 单个模型绑定 — 一个供应商可以绑定多个模型，各有不同用途
+ */
+data class ModelBinding(
+    val id: String = java.util.UUID.randomUUID().toString().take(8),
+    val modelName: String,                              // 实际模型ID
+    val displayLabel: String = "",                       // 用户自定义标签
+    val usedFor: String = "all"                          // "conversation" / "analysis" / "stt" / "all"
+) {
+    /** 是否用于某用途 */
+    fun matches(use: String): Boolean =
+        usedFor == "all" || usedFor.contains(use, ignoreCase = true)
+
+    companion object {
+        fun fromJson(json: JSONObject): ModelBinding = ModelBinding(
+            id = json.optString("id", java.util.UUID.randomUUID().toString().take(8)),
+            modelName = json.getString("modelName"),
+            displayLabel = json.optString("displayLabel", ""),
+            usedFor = json.optString("usedFor", "all")
+        )
+    }
+}
 
 /**
  * AI模型供应商枚举
- * 支持云端供应商 + 本地模型服务
  */
 enum class ModelProvider(
     val displayName: String,
     val defaultBaseUrl: String,
     val defaultModel: String,
+    val defaultSttModel: String = "",   // 默认语音转文字模型（空=不支持STT）
     val isLocal: Boolean = false,
     val description: String = "",
     val icon: String = ""
@@ -18,6 +44,7 @@ enum class ModelProvider(
         displayName = "OpenAI",
         defaultBaseUrl = "https://api.openai.com/v1",
         defaultModel = "gpt-4o",
+        defaultSttModel = "whisper-1",
         description = "GPT-4o/GPT-4o-mini 等",
         icon = "\uD83E\uDD16"
     ),
@@ -48,6 +75,14 @@ enum class ModelProvider(
         defaultModel = "glm-4-plus",
         description = "GLM-4/GLM-4V 等",
         icon = "\uD83D\uDC8E"
+    ),
+    SILICONFLOW(
+        displayName = "硅基流动",
+        defaultBaseUrl = "https://api.siliconflow.cn/v1",
+        defaultModel = "Qwen/Qwen2.5-7B-Instruct",
+        defaultSttModel = "FunAudioLLM/SenseVoiceSmall",
+        description = "免费语音模型+多模态推理",
+        icon = "\uD83C\uDF0A"
     ),
 
     // ===== 本地模型服务 =====
@@ -92,32 +127,114 @@ enum class ModelProvider(
 }
 
 /**
- * 单个供应商的完整配置
+ * 单个供应商的完整配置（支持多模型绑定）
  */
 data class ProviderConfig(
     val provider: ModelProvider = ModelProvider.OPENAI,
     val apiKey: String = "",
     val baseUrl: String = ModelProvider.OPENAI.defaultBaseUrl,
     val modelName: String = ModelProvider.OPENAI.defaultModel,
-    val enabled: Boolean = true
+    val enabled: Boolean = true,
+    val models: List<ModelBinding> = emptyList()
 ) {
-    fun toPrefs(): Map<String, String> = mapOf(
-        "provider_${provider.name}_api_key" to apiKey,
-        "provider_${provider.name}_base_url" to baseUrl,
-        "provider_${provider.name}_model" to modelName,
-        "provider_${provider.name}_enabled" to enabled.toString()
-    )
+    /** 获取已绑定模型数 */
+    val modelCount: Int get() = if (models.isNotEmpty()) models.size else 1
+
+    /** 根据用途获取模型名（含智能 fallback） */
+    fun getModelFor(usedFor: String): String {
+        if (models.isEmpty()) return modelName
+        // 1. 优先精确用途匹配
+        models.firstOrNull { it.usedFor == usedFor }?.modelName?.let { return it }
+        // 2. STT 特殊性：优先走供应商默认 STT 模型，避免 chat-only 模型被误用
+        if (usedFor == "stt") {
+            return provider.defaultSttModel.takeIf { it.isNotBlank() }
+                ?: models.firstOrNull { it.matches("all") }?.modelName
+                ?: modelName
+        }
+        // 3. "all" 作为通用兜底
+        return models.firstOrNull { it.matches("all") }?.modelName ?: modelName
+    }
+
+    fun getConversationModel(): String = getModelFor("conversation")
+    fun getAnalysisModel(): String = getModelFor("analysis")
+    fun getSttModel(): String = getModelFor("stt")
+
+    /** 根据用途获取完整ProviderConfig（模型名被替换） */
+    fun forPurpose(usedFor: String): ProviderConfig =
+        copy(modelName = getModelFor(usedFor))
+
+    fun toPrefs(): Map<String, String> {
+        val map = mutableMapOf(
+            "provider_${provider.name}_api_key" to apiKey,
+            "provider_${provider.name}_base_url" to baseUrl,
+            "provider_${provider.name}_model" to modelName,
+            "provider_${provider.name}_enabled" to enabled.toString()
+        )
+        // 多模型列表 → JSON
+        if (models.isNotEmpty()) {
+            val arr = JSONArray()
+            models.forEach { m ->
+                arr.put(JSONObject().apply {
+                    put("id", m.id)
+                    put("modelName", m.modelName)
+                    put("displayLabel", m.displayLabel)
+                    put("usedFor", m.usedFor)
+                })
+            }
+            map["provider_${provider.name}_models"] = arr.toString()
+        }
+        return map
+    }
 
     companion object {
         fun fromPrefs(provider: ModelProvider, prefs: (String) -> String?): ProviderConfig {
             val p = provider.name
+            val modelList = parseModelList(prefs("provider_${p}_models"))
+
+            // 迁移：如果 models 列表为空但 modelName 有值，从 modelName 创建一条 all 绑定
+            val finalModels = if (modelList.isEmpty()) {
+                val legacyModel = prefs("provider_${p}_model")
+                if (!legacyModel.isNullOrBlank() && legacyModel != provider.defaultModel) {
+                    // 检测是否有分开的 conversation/analysis/stt 配置
+                    val convModel = prefs("conversation_model_name")
+                    val analysisModel = prefs("analysis_model_name")
+                    val results = mutableListOf<ModelBinding>()
+                    if (!convModel.isNullOrBlank() && convModel != legacyModel) {
+                        results.add(ModelBinding(modelName = convModel, displayLabel = "对话模型", usedFor = "conversation"))
+                    }
+                    if (!analysisModel.isNullOrBlank() && analysisModel != legacyModel) {
+                        results.add(ModelBinding(modelName = analysisModel, displayLabel = "分析模型", usedFor = "analysis"))
+                    }
+                    // 默认的一条
+                    results.add(ModelBinding(
+                        modelName = legacyModel,
+                        displayLabel = if (results.isEmpty()) "默认模型" else "通用模型",
+                        usedFor = "all"
+                    ))
+                    results
+                } else emptyList()
+            } else modelList
+
             return ProviderConfig(
                 provider = provider,
                 apiKey = prefs("provider_${p}_api_key") ?: "",
                 baseUrl = prefs("provider_${p}_base_url") ?: provider.defaultBaseUrl,
                 modelName = prefs("provider_${p}_model") ?: provider.defaultModel,
-                enabled = prefs("provider_${p}_enabled")?.toBooleanStrictOrNull() ?: true
+                enabled = prefs("provider_${p}_enabled")?.toBooleanStrictOrNull() ?: true,
+                models = finalModels
             )
+        }
+
+        private fun parseModelList(json: String?): List<ModelBinding> {
+            if (json.isNullOrBlank()) return emptyList()
+            return try {
+                val arr = JSONArray(json)
+                (0 until arr.length()).map { i ->
+                    ModelBinding.fromJson(arr.getJSONObject(i))
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
         }
     }
 }

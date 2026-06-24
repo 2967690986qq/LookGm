@@ -124,10 +124,13 @@ class VoiceRecognizer(
 
                     if (text.isNotBlank()) {
                         onResult(text)
+                        // 注：识别到结果后不自动重启，由 VoiceConversationEngine
+                        // 在 AI 播报完成后通过 onSpeakDone 回调触发下一轮 startListening
+                        return
                     }
                 }
 
-                // 继续监听
+                // 没识别到有效文字 → 继续监听
                 restartListening()
             }
 

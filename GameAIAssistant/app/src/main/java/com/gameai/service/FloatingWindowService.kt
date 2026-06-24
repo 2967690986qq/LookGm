@@ -710,8 +710,7 @@ class FloatingWindowService : Service() {
     // =================================================================
 
     private fun expandPanel() {
-        // 语音模式：不展开面板，球内显示对话内容
-        if (isVoiceMode) return
+        // 允许语音对话期间展开面板查看任务列表
         if (isExpanded) return
         createPanel()
         isExpanded = true
@@ -989,8 +988,7 @@ class FloatingWindowService : Service() {
                 // === 进入语音模式（不扩大球体，保持圆形） ===
                 if (!isVoiceMode) {
                     isVoiceMode = true
-                    // 关闭面板
-                    if (isExpanded) destroyPanel()
+                    // 不再自动关闭面板 — 用户可能需要同时查看任务列表
                 }
 
                 // 评分隐藏，语音显示

@@ -78,29 +78,41 @@ class PreferencesManager(context: Context) {
     fun getLocalModelPort(): Int = kv.decodeInt("local_model_port", 11434)
     fun getLocalModelName(): String = kv.decodeString("local_model_name") ?: "qwen2.5:7b"
 
-    // ========== 双模型分离配置 ==========
-    /** 获取语音对话专用模型名（为空则回退到主模型） */
-    fun getConversationModelName(): String = kv.decodeString("conversation_model_name") ?: ""
-    fun setConversationModelName(name: String) = kv.encode("conversation_model_name", name)
-
-    /** 获取屏幕分析专用模型名（为空则回退到主模型） */
-    fun getAnalysisModelName(): String = kv.decodeString("analysis_model_name") ?: ""
-    fun setAnalysisModelName(name: String) = kv.encode("analysis_model_name", name)
-
-    /** 构建对话模型配置：独立模型名 + 主模型的基础URL/API Key */
+    // ========== 多模型绑定配置 ==========
+    /** 构建对话模型配置：优先从ProviderConfig.models中选conversation标签 */
     fun getConversationModelConfig(): ProviderConfig? {
         val baseConfig = getCurrentProviderConfig()
-        val convModel = getConversationModelName()
-        if (convModel.isBlank()) return baseConfig  // 未配置 → 使用主模型
-        return baseConfig.copy(modelName = convModel)
+        if (baseConfig.models.isEmpty()) {
+            // 旧版兼容：检查 conversation_model_name
+            val convModel = kv.decodeString("conversation_model_name") ?: ""
+            if (convModel.isNotBlank()) return baseConfig.copy(modelName = convModel)
+            return baseConfig
+        }
+        return baseConfig.forPurpose("conversation")
     }
 
-    /** 构建分析模型配置：独立模型名 + 主模型的基础URL/API Key */
+    /** 构建分析模型配置：优先从ProviderConfig.models中选analysis标签 */
     fun getAnalysisModelConfig(): ProviderConfig? {
         val baseConfig = getCurrentProviderConfig()
-        val analysisModel = getAnalysisModelName()
-        if (analysisModel.isBlank()) return baseConfig  // 未配置 → 使用主模型
-        return baseConfig.copy(modelName = analysisModel)
+        if (baseConfig.models.isEmpty()) {
+            val analysisModel = kv.decodeString("analysis_model_name") ?: ""
+            if (analysisModel.isNotBlank()) return baseConfig.copy(modelName = analysisModel)
+            return baseConfig
+        }
+        return baseConfig.forPurpose("analysis")
+    }
+
+    /** 获取语音转文字模型配置 */
+    fun getSttModelConfig(): ProviderConfig? {
+        val baseConfig = getCurrentProviderConfig()
+        if (baseConfig.models.isEmpty()) {
+            // 无多模型绑定 → 用供应商默认 STT 模型
+            val defaultStt = baseConfig.provider.defaultSttModel
+            return if (defaultStt.isNotBlank()) baseConfig.copy(modelName = defaultStt)
+            else baseConfig  // 无 STT 能力的供应商
+        }
+        // 有多模型绑定 → 走 forPurpose 智能 fallback（优先 stt 标签 → defaultSttModel → all → 原模型）
+        return baseConfig.forPurpose("stt")
     }
 
     // ========== 通用读写 ==========

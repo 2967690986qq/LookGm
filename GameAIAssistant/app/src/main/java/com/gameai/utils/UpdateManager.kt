@@ -406,13 +406,13 @@ object UpdateManager {
     }
 
     /**
-     * 版本号对比：支持格式 20260623 / 20260623-beta1
+     * 版本号对比：支持格式 20260623 / 20260623-beta1 / 2026062402
      * 返回正数 = a 更新，返回负数 = b 更新，返回0 = 相同
      */
     fun compareVersions(a: String, b: String): Int {
-        // 提取纯数字部分
-        val numA = a.replace(Regex("-.*"), "").trim().toLongOrNull() ?: 0L
-        val numB = b.replace(Regex("-.*"), "").trim().toLongOrNull() ?: 0L
+        // 提取纯数字部分：先去掉 beta 后缀，再去掉所有非数字后缀
+        val numA = a.replace(Regex("[-.].*"), "").trim().toLongOrNull() ?: 0L
+        val numB = b.replace(Regex("[-.].*"), "").trim().toLongOrNull() ?: 0L
 
         return when {
             numA > numB -> 1

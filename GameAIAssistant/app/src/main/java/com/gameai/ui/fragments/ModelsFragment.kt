@@ -9,14 +9,13 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.widget.Toast
+import android.widget.*
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.gameai.R
 import com.gameai.databinding.FragmentModelsBinding
+import com.gameai.model.ModelBinding
+import com.gameai.model.ModelClassifier
 import com.gameai.model.ModelProvider
 import com.gameai.model.ProviderConfig
 import com.gameai.utils.ModelConnectionTester
@@ -36,19 +35,19 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     private val config by lazy { prefs.loadConfig() }
     private val carouselHandler = Handler(Looper.getMainLooper())
 
-    // 每个供应商独立配置
+    // 内存缓存
     private val providerConfigs = mutableMapOf<String, ProviderConfig>()
     private var currentProvider = ModelProvider.OPENAI
+    private var currentModels = mutableListOf<ModelBinding>()   // 当前供应商的模型列表
     private var availableModels = mutableListOf<String>()
 
     private val allProviders = listOf(
         ModelProvider.OPENAI, ModelProvider.DEEPSEEK, ModelProvider.QWEN,
-        ModelProvider.ERNIE, ModelProvider.ZHIPU,
+        ModelProvider.ERNIE, ModelProvider.ZHIPU, ModelProvider.SILICONFLOW,
         ModelProvider.LOCAL_OLLAMA, ModelProvider.LOCAL_VLLM, ModelProvider.LOCAL_LM_STUDIO,
         ModelProvider.CUSTOM
     )
 
-    // 轮播相关
     private var carouselRunnable: Runnable? = null
     private var resumeCarouselRunnable: Runnable? = null
     private var currentCarouselIdx = 0
@@ -66,33 +65,30 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         setupProviderChips()
         setupListeners()
         loadCurrentProviderUI()
+        refreshConfiguredProvidersOverview()
         startCarousel()
     }
 
-    // ===== 加载所有已保存配置 =====
+    // ===== 加载 =====
 
     private fun loadAllProviderConfigs() {
         providerConfigs.clear()
         val freshConfig = prefs.loadConfig()
         for (provider in allProviders) {
             val saved = freshConfig.cloudProviderConfigs[provider.name]
-            if (saved != null) {
-                providerConfigs[provider.name] = saved
-            }
+            if (saved != null) providerConfigs[provider.name] = saved
         }
         currentProvider = ModelProvider.fromName(prefs.getString("current_provider", "OPENAI"))
     }
 
-    // ===== 供应商 Chips（图标 + 动画 + 轮播）=====
+    // ===== 供应商 Chips =====
 
     private fun setupProviderChips() {
         val chipContainer = binding.layoutProviderChips
         chipContainer.removeAllViews()
-
         for (provider in allProviders) {
             val isConfigured = providerConfigs.containsKey(provider.name)
             val isCurrent = provider == currentProvider
-
             val chip = buildChip(provider, isConfigured, isCurrent)
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -100,32 +96,28 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
             ).apply { marginEnd = 12 }
             chipContainer.addView(chip, params)
         }
-
         updateConfiguredCountBadge()
     }
 
     private fun buildChip(provider: ModelProvider, configured: Boolean, current: Boolean): TextView {
-        val label = "${provider.icon}  ${provider.displayName}${if (configured) " ✓" else ""}"
-
-        val bgRes = when {
-            current -> R.drawable.bg_chip_selected
-            configured -> R.drawable.bg_chip_selected
-            else -> R.drawable.bg_chip_normal
+        val cfg = providerConfigs[provider.name]
+        val modelCount = cfg?.modelCount ?: 0
+        val extra = when {
+            configured && modelCount > 1 -> " ·${modelCount}"
+            configured -> " ✓"
+            else -> ""
         }
-
+        val label = "${provider.icon}  ${provider.displayName}$extra"
+        val bgRes = if (current || configured) R.drawable.bg_chip_selected else R.drawable.bg_chip_normal
         val textColor = when {
             current -> resources.getColor(R.color.bg_secondary, null)
             configured -> resources.getColor(R.color.accent_primary, null)
             else -> resources.getColor(R.color.text_secondary, null)
         }
-
         return TextView(requireContext()).apply {
-            text = label
-            textSize = 13.5f
-            setPadding(16, 11, 16, 11)
-            gravity = Gravity.CENTER
-            setTextColor(textColor)
-            background = resources.getDrawable(bgRes, null)
+            text = label; textSize = 13.5f
+            setPadding(16, 11, 16, 11); gravity = Gravity.CENTER
+            setTextColor(textColor); background = resources.getDrawable(bgRes, null)
             typeface = if (current) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             setOnClickListener { onProviderChipClicked(provider, this) }
         }
@@ -133,19 +125,12 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
 
     private fun onProviderChipClicked(provider: ModelProvider, chip: TextView) {
         if (provider == currentProvider) return
-
-        // 动画缩放
         animateChipPress(chip)
-
-        // 保存当前编辑内容
         saveCurrentToMemory()
-
         currentProvider = provider
         prefs.saveString("current_provider", provider.name)
         refreshAllChipStyles()
         loadCurrentProviderUI()
-
-        // 滚动到当前选中
         currentCarouselIdx = allProviders.indexOf(provider)
         scrollToCurrentChip()
     }
@@ -162,23 +147,22 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
             val provider = allProviders.getOrNull(i) ?: continue
             val configured = providerConfigs.containsKey(provider.name)
             val current = provider == currentProvider
-
-            val label = "${provider.icon}  ${provider.displayName}${if (configured) " ✓" else ""}"
-            chip.text = label
-
-            val bgRes = when {
-                current -> R.drawable.bg_chip_selected
-                configured -> R.drawable.bg_chip_selected
-                else -> R.drawable.bg_chip_normal
+            val cfg = providerConfigs[provider.name]
+            val modelCount = cfg?.modelCount ?: 0
+            val extra = when {
+                configured && modelCount > 1 -> " ·${modelCount}"
+                configured -> " ✓"
+                else -> ""
             }
+            val label = "${provider.icon}  ${provider.displayName}$extra"
+            chip.text = label
+            val bgRes = if (current || configured) R.drawable.bg_chip_selected else R.drawable.bg_chip_normal
             val textColor = when {
                 current -> resources.getColor(R.color.bg_secondary, null)
                 configured -> resources.getColor(R.color.accent_primary, null)
                 else -> resources.getColor(R.color.text_secondary, null)
             }
-
-            chip.setTextColor(textColor)
-            chip.background = resources.getDrawable(bgRes, null)
+            chip.setTextColor(textColor); chip.background = resources.getDrawable(bgRes, null)
             chip.typeface = if (current) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
         updateConfiguredCountBadge()
@@ -194,7 +178,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         }
     }
 
-    // ===== 轮播效果 =====
+    // ===== 轮播 =====
 
     private fun startCarousel() {
         carouselRunnable = object : Runnable {
@@ -218,102 +202,286 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     private fun pauseCarouselTemporarily() {
         carouselHandler.removeCallbacks(carouselRunnable ?: return)
         carouselHandler.removeCallbacks(resumeCarouselRunnable ?: return)
-
         resumeCarouselRunnable = Runnable { startCarousel() }
         carouselHandler.postDelayed(resumeCarouselRunnable!!, 5000)
     }
 
-    // ===== 当前供应商 UI 加载 =====
+    // ===== 当前供应商 UI =====
 
     private fun saveCurrentToMemory() {
         val apiKey = binding.etApiKey.text.toString().trim()
         val baseUrl = binding.etBaseUrl.text.toString().trim()
-        val model = binding.etModelName.text.toString().trim()
-
-        if (apiKey.isNotEmpty() || model.isNotEmpty()) {
+        if (apiKey.isNotEmpty() || currentModels.isNotEmpty()) {
             providerConfigs[currentProvider.name] = ProviderConfig(
                 provider = currentProvider,
                 apiKey = apiKey,
                 baseUrl = baseUrl.ifEmpty { currentProvider.defaultBaseUrl },
-                modelName = model.ifEmpty { currentProvider.defaultModel },
-                enabled = true
+                modelName = currentModels.firstOrNull()?.modelName ?: currentProvider.defaultModel,
+                enabled = true,
+                models = currentModels.toList()
             )
         }
     }
 
     private fun loadCurrentProviderUI() {
         val savedCfg = providerConfigs[currentProvider.name]
+        currentModels.clear()
+        currentModels.addAll(savedCfg?.models ?: emptyList())
 
         binding.tvCurrentProvider.text = "${currentProvider.icon}  ${currentProvider.displayName} 配置"
-
-        // API Key — 始终显示
         binding.etApiKey.setText(savedCfg?.apiKey ?: "")
-
-        // Base URL
         binding.etBaseUrl.setText(savedCfg?.baseUrl ?: currentProvider.defaultBaseUrl)
 
-        // 模型名输入框 — 始终显示
-        binding.etModelName.setText(savedCfg?.modelName ?: "")
-
-        // 清空模型列表
         availableModels.clear()
         binding.layoutModelList.removeAllViews()
         binding.tvModelSectionTitle.visibility = View.GONE
-
-        // 状态清空
         binding.tvFetchStatus.text = ""
         binding.layoutFetchStatus.visibility = View.GONE
         binding.tvModelStatus.text = ""
+
+        renderBoundModels()
     }
 
-    // ===== 模型列表渲染（卡片式，点击填充到输入框）=====
+    // ===== 已绑定模型列表渲染 =====
+
+    private fun renderBoundModels() {
+        val container = binding.layoutBoundModels
+        container.removeAllViews()
+
+        if (currentModels.isEmpty()) {
+            binding.tvBoundModelsTitle.visibility = View.GONE
+            binding.tvNoBoundModels.visibility = View.VISIBLE
+            return
+        }
+
+        binding.tvBoundModelsTitle.visibility = View.VISIBLE
+        binding.tvBoundModelsTitle.text = "已绑定的模型 · ${currentModels.size} 个"
+        binding.tvNoBoundModels.visibility = View.GONE
+
+        for ((idx, model) in currentModels.withIndex()) {
+            val card = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(12, 10, 4, 10)
+                background = resources.getDrawable(R.drawable.bg_model_card, null)
+            }
+
+            // 名称 + 标签
+            val infoLayout = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+
+            val nameRow = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            val nameTv = TextView(requireContext()).apply {
+                text = model.modelName
+                textSize = 13f; typeface = Typeface.MONOSPACE
+                setTextColor(resources.getColor(R.color.text_primary, null))
+                maxLines = 1
+            }
+            nameRow.addView(nameTv)
+
+            if (model.displayLabel.isNotBlank()) {
+                val labelTv = TextView(requireContext()).apply {
+                    text = "  ${model.displayLabel}"
+                    textSize = 11f
+                    setTextColor(resources.getColor(R.color.text_hint, null))
+                    maxLines = 1
+                }
+                nameRow.addView(labelTv)
+            }
+            infoLayout.addView(nameRow)
+
+            // 用途标签
+            val tagTv = TextView(requireContext()).apply {
+                text = usedForLabel(model.usedFor)
+                textSize = 10f
+                setTextColor(resources.getColor(R.color.bg_primary, null))
+                background = resources.getDrawable(when (model.usedFor) {
+                    "conversation" -> R.drawable.bg_chip_selected
+                    "analysis" -> R.drawable.bg_chip_selected
+                    "stt" -> R.drawable.bg_chip_selected
+                    else -> R.drawable.bg_chip_normal
+                }, null)
+                setPadding(6, 2, 6, 2)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = 3 }
+            }
+            infoLayout.addView(tagTv)
+            card.addView(infoLayout, LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            ))
+
+            // 编辑按钮
+            val editBtn = TextView(requireContext()).apply {
+                text = "✎"; textSize = 18f; setPadding(10, 4, 6, 4)
+                setTextColor(resources.getColor(R.color.text_secondary, null))
+                setOnClickListener { showModelDialog(model, idx) }
+            }
+            card.addView(editBtn)
+
+            // 删除按钮
+            val delBtn = TextView(requireContext()).apply {
+                text = "✕"; textSize = 16f; setPadding(10, 4, 12, 4)
+                setTextColor(resources.getColor(R.color.status_error, null))
+                setOnClickListener {
+                    currentModels.removeAt(idx)
+                    renderBoundModels()
+                }
+            }
+            card.addView(delBtn)
+
+            container.addView(card, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = 6 })
+        }
+    }
+
+    private fun showModelDialog(
+        existing: ModelBinding? = null,
+        editIdx: Int = -1,
+        prefillModelName: String = ""  // 从 API 列表点击时的预填模型名
+    ) {
+        val isEdit = existing != null
+        val inflater = LayoutInflater.from(requireContext())
+        val dialogView = inflater.inflate(R.layout.dialog_model_edit, null)
+        val etModelName = dialogView.findViewById<EditText>(R.id.et_dialog_model_name)
+        val etLabel = dialogView.findViewById<EditText>(R.id.et_dialog_label)
+        val spinnerUsedFor = dialogView.findViewById<Spinner>(R.id.spinner_used_for)
+        val tvClassifyHint = dialogView.findViewById<TextView>(R.id.tv_classify_hint)
+
+        val usedForOptions = arrayOf("conversation（语音对话）", "analysis（画面分析）", "stt（语音转文字）", "all（通用）")
+        val usedForValues = arrayOf("conversation", "analysis", "stt", "all")
+        val spinnerAdapter = ArrayAdapter(requireContext(), R.layout.item_spinner_selected, usedForOptions)
+        spinnerAdapter.setDropDownViewResource(R.layout.item_spinner_dropdown)
+        spinnerUsedFor.adapter = spinnerAdapter
+
+        // 模型名称变化时自动检测分类
+        val onModelNameChanged: (String) -> Unit = { name ->
+            val detected = ModelClassifier.classify(name.trim())
+            val idx = usedForValues.indexOf(detected).coerceAtLeast(0)
+            spinnerUsedFor.setSelection(idx)
+            tvClassifyHint?.apply {
+                text = "自动检测: ${ModelClassifier.classifyLabel(name.trim())} — ${ModelClassifier.classifyReason(name.trim())}"
+                visibility = if (name.trim().isNotEmpty()) View.VISIBLE else View.GONE
+            }
+        }
+
+        if (existing != null) {
+            etModelName.setText(existing.modelName)
+            etLabel.setText(existing.displayLabel)
+            val idx = usedForValues.indexOf(existing.usedFor).coerceAtLeast(0)
+            spinnerUsedFor.setSelection(idx)
+            onModelNameChanged(existing.modelName)
+        } else if (prefillModelName.isNotEmpty()) {
+            etModelName.setText(prefillModelName)
+            etLabel.setText(ModelClassifier.classifyLabel(prefillModelName).replace(Regex("^[^\\p{L}]+"), ""))
+            onModelNameChanged(prefillModelName)
+        }
+
+        // 监听输入变化实时检测
+        etModelName.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) {
+                onModelNameChanged(s?.toString() ?: "")
+            }
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+        })
+
+        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(if (isEdit) "编辑模型" else "添加模型")
+            .setView(dialogView)
+            .setPositiveButton("确定") { _, _ ->
+                val name = etModelName.text.toString().trim()
+                if (name.isEmpty()) {
+                    Toast.makeText(requireContext(), "请输入模型名称", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val label = etLabel.text.toString().trim()
+                val usedFor = usedForValues[spinnerUsedFor.selectedItemPosition]
+                val binding = ModelBinding(
+                    id = existing?.id ?: java.util.UUID.randomUUID().toString().take(8),
+                    modelName = name,
+                    displayLabel = label,
+                    usedFor = usedFor
+                )
+                if (isEdit && editIdx >= 0) {
+                    currentModels[editIdx] = binding
+                } else {
+                    currentModels.add(binding)
+                }
+                renderBoundModels()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+
+        // 设置对话框样式
+        dialog.window?.setBackgroundDrawableResource(R.drawable.bg_card)
+    }
+
+    // ===== 可用模型列表（获取到的，点击添加到绑定）=====
 
     private fun renderModelList(models: List<String>) {
         availableModels.clear()
         availableModels.addAll(models)
         val container = binding.layoutModelList
         container.removeAllViews()
-
         if (models.isEmpty()) return
 
         binding.tvModelSectionTitle.visibility = View.VISIBLE
-        binding.tvModelSectionTitle.text = "可用模型 · ${models.size} 个（点击选择）"
+        binding.tvModelSectionTitle.text = "可用模型 · ${models.size} 个（点击弹出对话框，自动检测类型）"
 
-        val currentModel = binding.etModelName.text.toString().trim()
+        val boundNames = currentModels.map { it.modelName }.toSet()
 
         for (model in models) {
-            val isSelected = model == currentModel
+            val alreadyBound = model in boundNames
+            val detectedType = ModelClassifier.classify(model)
 
             val card = layoutInflater.inflate(R.layout.item_model_card, container, false)
-
             val viewAccent = card.findViewById<View>(R.id.view_accent)
             val tvModelName = card.findViewById<TextView>(R.id.tv_model_name)
             val tvCheck = card.findViewById<TextView>(R.id.tv_check)
 
-            tvModelName.text = model
+            // 模型名 + 检测类型标签
+            val typeEmoji = when (detectedType) {
+                "stt" -> " 🎙️"
+                "analysis" -> " 🔬"
+                else -> ""
+            }
+            tvModelName.text = model + typeEmoji
 
-            if (isSelected) {
+            // 根据检测类型设置左侧彩色条
+            val accentColor = when (detectedType) {
+                "stt" -> resources.getColor(R.color.status_warning, null)
+                "analysis" -> resources.getColor(R.color.accent_primary, null)
+                else -> resources.getColor(R.color.divider, null)
+            }
+
+            if (alreadyBound) {
                 card.background = resources.getDrawable(R.drawable.bg_model_card_selected, null)
-                viewAccent.setBackgroundColor(resources.getColor(R.color.accent_primary, null))
+                viewAccent.setBackgroundColor(resources.getColor(R.color.status_success, null))
                 tvCheck.visibility = View.VISIBLE
-                tvModelName.typeface = Typeface.DEFAULT_BOLD
+                tvCheck.text = "✓"
             } else {
                 card.background = resources.getDrawable(R.drawable.bg_model_card, null)
-                viewAccent.setBackgroundColor(resources.getColor(R.color.divider, null))
+                viewAccent.setBackgroundColor(accentColor)
                 tvCheck.visibility = View.GONE
-                tvModelName.typeface = Typeface.DEFAULT
             }
 
-            // 点击 → 填充到输入框
             card.setOnClickListener {
-                // 动画反馈
-                animateChipPress(card)
-
-                binding.etModelName.setText(model)
-                binding.etModelName.setSelection(model.length)
-                renderModelList(models) // 刷新选中状态
+                if (alreadyBound) {
+                    Toast.makeText(requireContext(), "该模型已在绑定列表中", Toast.LENGTH_SHORT).show()
+                } else {
+                    // 弹出对话框，预填模型名并自动分类
+                    showModelDialog(prefillModelName = model)
+                }
             }
-
             container.addView(card)
         }
     }
@@ -322,13 +490,12 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
 
     private fun setupListeners() {
         binding.btnFetchModels.setOnClickListener { fetchModelList() }
+        binding.btnAddModel.setOnClickListener { showModelDialog() }
         binding.btnTestModel.setOnClickListener { testConnection() }
         binding.btnSaveConfig.setOnClickListener { saveConfig() }
-
-        // 触摸横向滑动时暂停轮播
         binding.hsProviderChips.setOnTouchListener { _, _ ->
             pauseCarouselTemporarily()
-            false // 不消费触摸，让ScrollView正常滚动
+            false
         }
     }
 
@@ -337,16 +504,12 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     private fun fetchModelList() {
         val apiKey = binding.etApiKey.text.toString().trim()
         val baseUrl = binding.etBaseUrl.text.toString().trim()
-
         if (apiKey.isEmpty() && !currentProvider.isLocal) {
-            Toast.makeText(requireContext(), "请先填写 API Key", Toast.LENGTH_SHORT).show()
-            return
+            Toast.makeText(requireContext(), "请先填写 API Key", Toast.LENGTH_SHORT).show(); return
         }
         if (baseUrl.isEmpty()) {
-            Toast.makeText(requireContext(), "请填写接口地址", Toast.LENGTH_SHORT).show()
-            return
+            Toast.makeText(requireContext(), "请填写接口地址", Toast.LENGTH_SHORT).show(); return
         }
-
         binding.layoutFetchStatus.visibility = View.VISIBLE
         binding.pbFetch.visibility = View.VISIBLE
         binding.tvFetchStatus.text = "正在获取模型列表..."
@@ -359,7 +522,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
                 }
                 if (models.isNotEmpty()) {
                     renderModelList(models)
-                    binding.tvFetchStatus.text = "✓ 获取到 ${models.size} 个模型"
+                    binding.tvFetchStatus.text = "✓ 获取到 ${models.size} 个模型，点击可添加到绑定列表"
                     binding.tvFetchStatus.setTextColor(resources.getColor(R.color.status_success, null))
                 } else {
                     binding.tvFetchStatus.text = "未获取到模型列表"
@@ -382,7 +545,6 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         conn.setRequestProperty("Content-Type", "application/json")
         conn.connectTimeout = 8000
         conn.readTimeout = 10000
-
         return try {
             val response = conn.inputStream.bufferedReader().readText()
             conn.disconnect()
@@ -398,18 +560,17 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         var idx = json.indexOf("\"data\"")
         if (idx < 0) idx = json.indexOf("\"models\"")
         if (idx < 0) return models
-
         var remaining = json.substring(idx)
         var safety = 0
         while (safety < 500) {
             safety++
-            val idIdx = remaining.indexOf("\"id\"")
+            val idIdx = remaining.indexOf("\"id\"") ?: break
             if (idIdx < 0) break
-            val colonIdx = remaining.indexOf(':', idIdx)
+            val colonIdx = remaining.indexOf(':', idIdx) ?: break
             if (colonIdx < 0) break
-            val startQuote = remaining.indexOf('"', colonIdx + 1)
+            val startQuote = remaining.indexOf('"', colonIdx + 1) ?: break
             if (startQuote < 0) break
-            val endQuote = remaining.indexOf('"', startQuote + 1)
+            val endQuote = remaining.indexOf('"', startQuote + 1) ?: break
             if (endQuote < 0) break
             val modelName = remaining.substring(startQuote + 1, endQuote)
             if (modelName.isNotEmpty() && modelName.length > 1 && !modelName.contains(":")) {
@@ -425,12 +586,9 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     private fun testConnection() {
         val apiKey = binding.etApiKey.text.toString().trim()
         val baseUrl = binding.etBaseUrl.text.toString().trim()
-
         if (baseUrl.isEmpty()) {
-            Toast.makeText(requireContext(), "请填写接口地址", Toast.LENGTH_SHORT).show()
-            return
+            Toast.makeText(requireContext(), "请填写接口地址", Toast.LENGTH_SHORT).show(); return
         }
-
         binding.tvModelStatus.text = "测试中..."
         binding.tvModelStatus.setTextColor(resources.getColor(R.color.text_secondary, null))
 
@@ -442,9 +600,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
             if (result.success) {
                 binding.tvModelStatus.text = "✓ 连接成功 (${result.latencyMs}ms)"
                 binding.tvModelStatus.setTextColor(resources.getColor(R.color.status_success, null))
-                if (result.availableModels.isNotEmpty()) {
-                    renderModelList(result.availableModels)
-                }
+                if (result.availableModels.isNotEmpty()) renderModelList(result.availableModels)
             } else {
                 binding.tvModelStatus.text = "✗ 连接失败: ${result.message}"
                 binding.tvModelStatus.setTextColor(resources.getColor(R.color.status_error, null))
@@ -457,32 +613,52 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     private fun saveConfig() {
         val apiKey = binding.etApiKey.text.toString().trim()
         val baseUrl = binding.etBaseUrl.text.toString().trim()
-        val modelName = binding.etModelName.text.toString().trim()
 
-        if (modelName.isEmpty()) {
-            Toast.makeText(requireContext(), "请输入或选择模型名称", Toast.LENGTH_SHORT).show()
+        if (currentModels.isEmpty()) {
+            Toast.makeText(requireContext(), "请至少添加一个模型（获取列表或手动添加）", Toast.LENGTH_SHORT).show()
             return
+        }
+
+        // 检查模型用途覆盖
+        val hasConversation = currentModels.any { it.matches("conversation") || it.matches("all") }
+        val hasAnalysis = currentModels.any { it.matches("analysis") || it.matches("all") }
+        val hasStt = currentModels.any { it.matches("stt") }
+
+        val warnings = mutableListOf<String>()
+        if (!hasConversation) warnings.add("未绑定\"语音对话\"用途的模型，语音对话功能将不可用")
+        if (!hasAnalysis) warnings.add("未绑定\"画面分析\"用途的模型，画面分析将使用对话模型代替")
+        if (!hasStt && currentProvider.defaultSttModel.isBlank()) {
+            warnings.add("当前供应商不支持语音转文字且未绑定STT模型，语音对话将无法使用")
         }
 
         val newCfg = ProviderConfig(
             provider = currentProvider,
             apiKey = apiKey,
             baseUrl = baseUrl.ifEmpty { currentProvider.defaultBaseUrl },
-            modelName = modelName,
-            enabled = true
+            modelName = currentModels.first().modelName,
+            enabled = true,
+            models = currentModels.toList()
         )
 
-        // 立即更新内存
         providerConfigs[currentProvider.name] = newCfg
 
-        // 立即写入 MMKV（绕过 GameConfig.toPreferences 可能丢失的问题）
+        // 写 MMKV（直接写，绕过 GameConfig 延迟问题）
         prefs.saveString("provider_${currentProvider.name}_api_key", apiKey)
         prefs.saveString("provider_${currentProvider.name}_base_url", baseUrl.ifEmpty { currentProvider.defaultBaseUrl })
-        prefs.saveString("provider_${currentProvider.name}_model", modelName)
+        prefs.saveString("provider_${currentProvider.name}_model", currentModels.first().modelName)
         prefs.saveString("provider_${currentProvider.name}_enabled", "true")
         prefs.saveString("current_provider", currentProvider.name)
+        // 保存多模型 JSON
+        val modelsJson = org.json.JSONArray()
+        currentModels.forEach { m ->
+            modelsJson.put(org.json.JSONObject().apply {
+                put("id", m.id); put("modelName", m.modelName)
+                put("displayLabel", m.displayLabel); put("usedFor", m.usedFor)
+            })
+        }
+        prefs.saveString("provider_${currentProvider.name}_models", modelsJson.toString())
 
-        // 同时更新 GameConfig 整体
+        // 同时更新 GameConfig
         val updatedConfig = config.copy(
             currentProvider = currentProvider,
             cloudProviderConfigs = providerConfigs.toMap()
@@ -492,7 +668,12 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         refreshAllChipStyles()
         refreshConfiguredProvidersOverview()
 
-        Toast.makeText(requireContext(), "✓ ${currentProvider.displayName} 配置已保存", Toast.LENGTH_SHORT).show()
+        val savedMsg = "✓ ${currentProvider.displayName} 已保存 ${currentModels.size} 个模型"
+        if (warnings.isNotEmpty()) {
+            Toast.makeText(requireContext(), "$savedMsg\n⚠️ ${warnings.first()}", Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(requireContext(), savedMsg, Toast.LENGTH_SHORT).show()
+        }
     }
 
     // ===== 已配置供应商概览 =====
@@ -500,20 +681,23 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     private fun refreshConfiguredProvidersOverview() {
         val container = binding.layoutConfiguredProviders
         container.removeAllViews()
-
         if (providerConfigs.isEmpty()) {
-            binding.tvNoConfigured.visibility = View.VISIBLE
-            return
+            binding.tvNoConfigured.visibility = View.VISIBLE; return
         }
-
         binding.tvNoConfigured.visibility = View.GONE
 
         for ((name, cfg) in providerConfigs) {
             val provider = ModelProvider.fromName(name)
+            val modelCount = cfg.modelCount
+            val modelsSummary = if (cfg.models.isNotEmpty()) {
+                cfg.models.joinToString(" · ") { m ->
+                    val tag = when (m.usedFor) { "conversation" -> "🗣" ; "analysis" -> "🔍" ; "stt" -> "🎤" ; else -> "" }
+                    "$tag${m.modelName}"
+                }
+            } else cfg.modelName
 
             val card = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.VERTICAL
                 setPadding(14, 12, 14, 12)
                 background = resources.getDrawable(R.drawable.bg_provider_card, null)
                 setOnClickListener {
@@ -528,37 +712,34 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
             }
 
             val nameTv = TextView(requireContext()).apply {
-                text = "${provider.icon} ${provider.displayName}"
-                textSize = 13f
-                setTextColor(resources.getColor(R.color.text_primary, null))
+                text = "${provider.icon} ${provider.displayName}  · ${modelCount}个模型"
+                textSize = 13f; setTextColor(resources.getColor(R.color.text_primary, null))
                 typeface = Typeface.DEFAULT_BOLD
-                setPadding(0, 0, 8, 0)
             }
             card.addView(nameTv)
 
             val modelTv = TextView(requireContext()).apply {
-                text = cfg.modelName
-                textSize = 11f
-                setTextColor(resources.getColor(R.color.accent_primary, null))
-                maxLines = 1
+                text = modelsSummary
+                textSize = 11f; setTextColor(resources.getColor(R.color.accent_primary, null))
+                maxLines = 3; layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = 4 }
             }
-            card.addView(modelTv, LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-            ))
-
-            val arrow = TextView(requireContext()).apply {
-                text = "→"
-                textSize = 16f
-                setTextColor(resources.getColor(R.color.text_hint, null))
-                setPadding(8, 0, 0, 0)
-            }
-            card.addView(arrow)
+            card.addView(modelTv)
 
             container.addView(card, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = 8 })
         }
+    }
+
+    private fun usedForLabel(usedFor: String): String = when (usedFor) {
+        "conversation" -> "语音对话"
+        "analysis" -> "画面分析"
+        "stt" -> "语音转文字"
+        else -> "通用"
     }
 
     override fun onDestroyView() {

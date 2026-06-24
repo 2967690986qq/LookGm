@@ -37,6 +37,7 @@ class GitHubOAuthActivity : AppCompatActivity() {
 
         val code = uri.getQueryParameter("code")
         val error = uri.getQueryParameter("error")
+        val state = uri.getQueryParameter("state")
 
         if (error != null) {
             val errorDesc = uri.getQueryParameter("error_description") ?: error
@@ -46,9 +47,14 @@ class GitHubOAuthActivity : AppCompatActivity() {
         }
 
         if (code.isNullOrBlank()) {
-            Toast.makeText(this, "未获取到授权码", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "未获取到授权码，请重试", Toast.LENGTH_LONG).show()
             finish()
             return
+        }
+
+        // 验证 state 防 CSRF（非阻塞：即使 state 校验失败也继续流程，仅做日志记录）
+        if (!GitHubAuthManager.validateState(this, state)) {
+            android.util.Log.w("GitHubOAuth", "State 校验失败，可能为非本人发起或多次点击")
         }
 
         // 异步换取 Token + 获取用户信息

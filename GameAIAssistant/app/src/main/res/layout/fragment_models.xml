@@ -24,7 +24,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="绑定供应商，配置你的 AI 模型"
+            android:text="绑定供应商，每个供应商可添加多个模型"
             android:textColor="@color/text_secondary"
             android:textSize="13sp"
             android:layout_marginTop="4dp"
@@ -152,85 +152,106 @@
                 android:textSize="13sp"
                 android:maxLines="1" />
 
-            <!-- 模型名称 -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/model_name"
-                android:textColor="@color/text_secondary"
-                android:textSize="11sp"
-                android:layout_marginTop="16dp"
-                android:layout_marginBottom="6dp" />
-
+            <!-- 获取模型列表按钮 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:gravity="center_vertical">
-
-                <EditText
-                    android:id="@+id/et_model_name"
-                    android:layout_width="0dp"
-                    android:layout_height="48dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_input"
-                    android:hint="@string/model_name_hint"
-                    android:inputType="text"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
-                    android:textColor="@color/text_primary"
-                    android:textColorHint="@color/text_hint"
-                    android:textSize="14sp"
-                    android:maxLines="1" />
+                android:gravity="center"
+                android:layout_marginTop="16dp"
+                android:layout_marginBottom="10dp">
 
                 <TextView
                     android:id="@+id/btn_fetch_models"
-                    android:layout_width="wrap_content"
-                    android:layout_height="48dp"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
                     android:background="@drawable/bg_btn_outline"
                     android:gravity="center"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="14dp"
                     android:text="@string/model_fetch"
                     android:textColor="@color/accent_primary"
-                    android:textSize="12sp"
-                    android:textStyle="bold"
-                    android:layout_marginStart="10dp" />
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <View android:layout_width="8dp" android:layout_height="1dp" />
+
+                <TextView
+                    android:id="@+id/btn_add_model"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_btn_primary"
+                    android:gravity="center"
+                    android:text="+ 手动添加模型"
+                    android:textColor="@color/bg_primary"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
             </LinearLayout>
-        </LinearLayout>
 
-        <!-- 加载指示器 -->
-        <LinearLayout
-            android:id="@+id/layout_fetch_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:visibility="gone"
-            android:layout_marginBottom="12dp">
-
-            <ProgressBar
-                android:id="@+id/pb_fetch"
-                android:layout_width="16dp"
-                android:layout_height="16dp"
-                android:indeterminateTint="@color/accent_primary" />
-
-            <TextView
-                android:id="@+id/tv_fetch_status"
-                android:layout_width="0dp"
+            <!-- 载指示器 -->
+            <LinearLayout
+                android:id="@+id/layout_fetch_status"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:visibility="gone"
+                android:layout_marginBottom="8dp">
+
+                <ProgressBar
+                    android:id="@+id/pb_fetch"
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:indeterminateTint="@color/accent_primary" />
+
+                <TextView
+                    android:id="@+id/tv_fetch_status"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- ===== 已绑定模型列表 ===== -->
+            <TextView
+                android:id="@+id/tv_bound_models_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="已绑定的模型"
+                android:textColor="@color/accent_gold"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:visibility="gone"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="10dp" />
+
+            <LinearLayout
+                android:id="@+id/layout_bound_models"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+
+            <!-- 空状态 -->
+            <TextView
+                android:id="@+id/tv_no_bound_models"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="暂未绑定模型，点击下方按钮获取或手动添加"
+                android:textColor="@color/text_hint"
+                android:textSize="12sp"
+                android:gravity="center"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp" />
         </LinearLayout>
 
-        <!-- ===== 可用模型列表 ===== -->
+        <!-- ===== 可用模型列表（点击添加到绑定）===== -->
         <TextView
             android:id="@+id/tv_model_section_title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="可用模型（点击选择）"
+            android:text="可用模型（点击添加）"
             android:textColor="@color/accent_purple"
             android:textSize="14sp"
             android:textStyle="bold"

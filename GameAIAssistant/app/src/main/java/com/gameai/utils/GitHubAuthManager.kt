@@ -4,6 +4,7 @@ package com.gameai.utils
 
 import android.content.Context
 import android.util.Base64
+import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,7 @@ object GitHubAuthManager {
     // ============ OAuth App 配置 ============
     // 请在 GitHub Settings → Developer settings → OAuth Apps 创建后填入
     const val CLIENT_ID = "Ov23liQAokvYI7DAVmJv"   // GitHub OAuth App Client ID
+    private const val CLIENT_SECRET = "da164aad998317762b367b5885011b727f6066b8"  // 标准 OAuth App 换 Token 必须
     private const val REDIRECT_URI = "lookgm://oauth/callback"
     private const val AUTH_URL = "https://github.com/login/oauth/authorize"
     private const val TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -61,18 +63,22 @@ object GitHubAuthManager {
     fun getAuthorizationUrl(context: Context): String {
         val verifier = generateCodeVerifier()
         val challenge = generateCodeChallenge(verifier)
+        val state = "lookgm_${System.currentTimeMillis()}"
 
-        // 保存 verifier 供后续换 Token
+        // 使用 commit() 同步写入，防止进程被系统杀死时数据未落地
         context.getSharedPreferences("lookgm_auth", Context.MODE_PRIVATE)
             .edit()
             .putString(CODE_VERIFIER_KEY, verifier)
-            .apply()
+            .putString(AUTH_STATE_KEY, state)
+            .commit()
+
+        Log.d("GitHubAuth", "OAuth 授权开始, state=$state")
 
         val params = mapOf(
             "client_id" to CLIENT_ID,
             "redirect_uri" to REDIRECT_URI,
             "scope" to "user",
-            "state" to "lookgm_${System.currentTimeMillis()}",
+            "state" to state,
             "code_challenge" to challenge,
             "code_challenge_method" to "S256"
         )
@@ -95,6 +101,7 @@ object GitHubAuthManager {
             try {
                 val body = mapOf(
                     "client_id" to CLIENT_ID,
+                    "client_secret" to CLIENT_SECRET,
                     "code" to code,
                     "redirect_uri" to REDIRECT_URI,
                     "code_verifier" to verifier,
@@ -111,32 +118,59 @@ object GitHubAuthManager {
                     .header("Accept", "application/json")
                     .build()
 
+                Log.d("GitHubAuth", "发起 Token 交换请求, code=${code.take(10)}..., verifier=${verifier.take(10)}...")
                 val response = httpClient.newCall(request).execute()
                 val responseBody = response.body?.string() ?: ""
 
+                Log.d("GitHubAuth", "Token 响应 HTTP ${response.code}, body=${responseBody.take(300)}")
+
                 if (!response.isSuccessful) {
-                    return@withContext TokenResult.Error("Token 请求失败: ${response.code}")
+                    // 尝试解析错误详情
+                    try {
+                        val errResp = gson.fromJson(responseBody, TokenResponse::class.java)
+                        if (errResp.error != null) {
+                            return@withContext TokenResult.Error(
+                                "${errResp.errorDescription ?: errResp.error} (HTTP ${response.code})"
+                            )
+                        }
+                    } catch (_: Exception) {}
+                    return@withContext TokenResult.Error("Token 请求失败: HTTP ${response.code}\n${responseBody.take(200)}")
                 }
 
                 val tokenResp = gson.fromJson(responseBody, TokenResponse::class.java)
 
                 if (tokenResp.error != null) {
+                    Log.e("GitHubAuth", "GitHub 返回错误: ${tokenResp.error} - ${tokenResp.errorDescription}")
                     return@withContext TokenResult.Error(tokenResp.errorDescription ?: tokenResp.error)
                 }
 
                 val accessToken = tokenResp.accessToken
                 if (accessToken.isNullOrBlank()) {
-                    return@withContext TokenResult.Error("未获取到 access_token")
+                    Log.e("GitHubAuth", "响应中无 access_token, body=$responseBody")
+                    return@withContext TokenResult.Error("GitHub 未返回 access_token")
                 }
 
-                // 保存 Token
+                Log.d("GitHubAuth", "获取 Token 成功, token=${accessToken.take(8)}...")
+
+                // 保存 Token（同步写入防止丢失）
                 prefs.edit()
                     .putString(ACCESS_TOKEN_KEY, accessToken)
                     .remove(CODE_VERIFIER_KEY)  // 用完即删
-                    .apply()
+                    .remove(AUTH_STATE_KEY)
+                    .commit()
 
                 TokenResult.Success(accessToken)
+            } catch (e: java.net.UnknownHostException) {
+                Log.e("GitHubAuth", "网络不可达: ${e.message}")
+                TokenResult.Error("网络不可达，请检查网络连接")
+            } catch (e: java.net.SocketTimeoutException) {
+                Log.e("GitHubAuth", "请求超时: ${e.message}")
+                TokenResult.Error("请求超时，请重试")
+            } catch (e: javax.net.ssl.SSLException) {
+                Log.e("GitHubAuth", "SSL 错误: ${e.message}")
+                TokenResult.Error("安全连接失败，请检查系统时间")
             } catch (e: Exception) {
+                Log.e("GitHubAuth", "Token 交换异常", e)
                 TokenResult.Error("网络异常: ${e.message}")
             }
         }
@@ -162,7 +196,7 @@ object GitHubAuthManager {
 
                 val user = gson.fromJson(body, GitHubUser::class.java)
 
-                // 保存用户信息
+                // 保存用户信息（同步写入）
                 context.getSharedPreferences("lookgm_auth", Context.MODE_PRIVATE)
                     .edit()
                     .putString(USER_INFO_KEY, body)
@@ -170,7 +204,9 @@ object GitHubAuthManager {
                     .putString("login_type", "github")
                     .putLong("login_time", System.currentTimeMillis())
                     .putBoolean("logged_in", true)
-                    .apply()
+                    .commit()
+
+                Log.d("GitHubAuth", "用户信息已缓存: @${user.login}")
 
                 user
             } catch (e: Exception) {
@@ -184,6 +220,18 @@ object GitHubAuthManager {
     fun getAccessToken(context: Context): String? {
         return context.getSharedPreferences("lookgm_auth", Context.MODE_PRIVATE)
             .getString(ACCESS_TOKEN_KEY, null)
+    }
+
+    /** 验证回调 state 是否与本机发起的请求匹配（防 CSRF） */
+    fun validateState(context: Context, callbackState: String?): Boolean {
+        if (callbackState.isNullOrBlank()) return false
+        val savedState = context.getSharedPreferences("lookgm_auth", Context.MODE_PRIVATE)
+            .getString(AUTH_STATE_KEY, null)
+        val valid = callbackState == savedState
+        if (!valid) {
+            Log.w("GitHubAuth", "State 不匹配! 期望=$savedState, 收到=$callbackState")
+        }
+        return valid
     }
 
     fun getCachedUser(context: Context): GitHubUser? {
@@ -204,9 +252,10 @@ object GitHubAuthManager {
             .remove(ACCESS_TOKEN_KEY)
             .remove(USER_INFO_KEY)
             .remove(CODE_VERIFIER_KEY)
+            .remove(AUTH_STATE_KEY)
             .putString("login_type", "local")
             .putBoolean("logged_in", false)
-            .apply()
+            .commit()
     }
 
     // ============ 数据模型 ============

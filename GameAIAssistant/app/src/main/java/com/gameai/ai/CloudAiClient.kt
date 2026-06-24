@@ -2,6 +2,8 @@
 package com.gameai.ai
 
 import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import com.gameai.model.ProviderConfig
 import kotlinx.coroutines.*
@@ -67,7 +69,6 @@ object CloudAiClient {
      * @param bitmap 当前屏幕截图（可为 null）
      * @param config 模型配置
      * @param userMessage 用户语音转文字
-     * @param history 历史对话记录
      * @return AI 口语化回复，失败返回 null
      */
     suspend fun converse(
@@ -87,6 +88,152 @@ object CloudAiClient {
             } finally {
                 apiLock.unlock()
             }
+        }
+    }
+
+    /**
+     * SSE 流式语音对话 — 仿豆包电话实时体验
+     *
+     * 原理：openai-compatible /chat/completions + stream=true
+     * 服务端通过 SSE (Server-Sent Events) 逐 token 推送，客户端实时接收并回调。
+     *
+     * 与豆包电话相同的关键体验：
+     * 1. 用户说出第一个字时 AI 就开始"思考"
+     * 2. AI 的第一个 token 在几百毫秒内到达（首token延迟）
+     * 3. 后续 token 连续流式到达，实现"边说边想"的效果
+     *
+     * @param bitmap 屏幕截图（可为 null）
+     * @param config 对话模型配置
+     * @param userMessage 语音识别出的文字
+     * @param onToken 每个新 token 的回调（含完整累积文本）
+     * @param onComplete 流结束回调（完整文本）
+     * @param onError 错误回调
+     * @return 用于取消的 Cancelable
+     */
+    fun converseStreaming(
+        bitmap: Bitmap?,
+        config: ProviderConfig,
+        userMessage: String,
+        onToken: (accumulatedText: String) -> Unit,
+        onComplete: (fullText: String) -> Unit,
+        onError: (String) -> Unit
+    ): StreamingCall {
+        val call = StreamingCall()
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        scope.launch {
+            try {
+                val body = buildConversationBodyStreaming(config.modelName, userMessage, bitmap)
+
+                val url = normalizeApiUrl(config.baseUrl) + "/chat/completions"
+                val requestBody = body.toRequestBody(JSON)
+                val request = Request.Builder()
+                    .url(url)
+                    .post(requestBody)
+                    .addHeader("Content-Type", "application/json")
+                    .addHeader("Authorization", "Bearer ${config.apiKey}")
+                    .addHeader("Accept", "text/event-stream")
+                    .build()
+
+                val response = client.newCall(request).execute()
+                call.responseRef = response
+
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: ""
+                    android.util.Log.w(TAG, "SSE error ${response.code}: $errorBody")
+                    Handler(Looper.getMainLooper()).post {
+                        onError("AI 请求失败 (HTTP ${response.code})")
+                    }
+                    return@launch
+                }
+
+                val source = response.body?.source() ?: run {
+                    Handler(Looper.getMainLooper()).post { onError("响应为空") }
+                    return@launch
+                }
+
+                val accumulated = StringBuilder()
+                var lineCount = 0
+
+                while (!source.exhausted() && !call.isCancelled) {
+                    val line = source.readUtf8Line() ?: break
+                    lineCount++
+
+                    if (line.isEmpty() || line.startsWith(":")) continue
+
+                    if (line == "data: [DONE]") break
+                    if (!line.startsWith("data: ")) continue
+
+                    val jsonStr = line.removePrefix("data: ").trim()
+                    if (jsonStr.isEmpty() || jsonStr == "[DONE]") break
+
+                    try {
+                        val json = org.json.JSONObject(jsonStr)
+                        val choices = json.optJSONArray("choices")
+                        if (choices != null && choices.length() > 0) {
+                            val delta = choices.getJSONObject(0).optJSONObject("delta")
+                            val content = delta?.optString("content", "") ?: ""
+                            if (content.isNotEmpty()) {
+                                accumulated.append(content)
+                                Handler(Looper.getMainLooper()).post {
+                                    onToken(accumulated.toString())
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {
+                        // 跳过无法解析的行
+                    }
+                }
+
+                response.close()
+                val fullText = accumulated.toString()
+                if (fullText.isNotBlank() && !call.isCancelled) {
+                    Handler(Looper.getMainLooper()).post {
+                        onComplete(fullText)
+                    }
+                } else if (call.isCancelled) {
+                    android.util.Log.d(TAG, "SSE 流被用户打断")
+                } else {
+                    Handler(Looper.getMainLooper()).post {
+                        onError("AI 未返回有效回复")
+                    }
+                }
+
+            } catch (e: java.io.IOException) {
+                if (!call.isCancelled) {
+                    Handler(Looper.getMainLooper()).post {
+                        onError("网络错误: ${e.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                if (!call.isCancelled) {
+                    Handler(Looper.getMainLooper()).post {
+                        onError("流式处理错误: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        call.scope = scope
+        return call
+    }
+
+    /** 流式调用的可取消句柄 */
+    class StreamingCall {
+        internal var scope: CoroutineScope? = null
+        internal var responseRef: okhttp3.Response? = null
+        @Volatile var isCancelled: Boolean = false
+            private set
+
+        /** 取消流式请求（打断用） */
+        fun cancel() {
+            isCancelled = true
+            try {
+                responseRef?.close()
+            } catch (_: Exception) {}
+            try {
+                scope?.cancel()
+            } catch (_: Exception) {}
         }
     }
 
@@ -233,6 +380,68 @@ object CloudAiClient {
         }.toString()
     }
 
+    /** 构建流式语音对话请求体（SSE，stream=true） */
+    private fun buildConversationBodyStreaming(
+        model: String,
+        userMessage: String,
+        bitmap: Bitmap?
+    ): String {
+        val messages = JSONArray()
+
+        messages.put(JSONObject().apply {
+            put("role", "system")
+            put("content", """
+你是一个游戏语音助手，名叫"小G"。你正在通过语音和玩家对话。玩家在玩王者荣耀，你能看到他的手机屏幕。
+
+说话要求：
+1. 使用口语化中文，像朋友聊天一样自然
+2. 回复简洁，控制在 2-4 句话（约 30-80 字）
+3. 基于看到的屏幕画面给出建议
+4. 如果玩家问战术问题，给出具体可操作的建议
+5. 语气轻松友好，适当使用语气词（"哦""呢""吧"）
+6. 不要使用任何格式标记（不用markdown、不用编号）
+
+你的能力：
+- 能看到玩家屏幕上的游戏画面
+- 可以分析局势、阵容、装备、小地图
+- 给出实时战术指导
+""".trimIndent())
+        })
+
+        if (bitmap != null) {
+            val base64Image = bitmapToBase64(bitmap)
+            val userContent = JSONArray()
+            userContent.put(JSONObject().apply {
+                put("type", "image_url")
+                put("image_url", JSONObject().apply {
+                    put("url", "data:image/jpeg;base64,$base64Image")
+                    put("detail", "low")
+                })
+            })
+            userContent.put(JSONObject().apply {
+                put("type", "text")
+                put("text", userMessage)
+            })
+            messages.put(JSONObject().apply {
+                put("role", "user")
+                put("content", userContent)
+            })
+        } else {
+            messages.put(JSONObject().apply {
+                put("role", "user")
+                put("content", userMessage)
+            })
+        }
+
+        return JSONObject().apply {
+            put("model", model)
+            put("messages", messages)
+            put("max_tokens", 200)
+            put("temperature", 0.7)
+            put("stream", true)
+        }.toString()
+    }
+
     // ============================================================
     //  响应解析
     // ============================================================
@@ -244,7 +453,7 @@ object CloudAiClient {
             val choices = json.getJSONArray("choices")
             if (choices.length() > 0) {
                 val message = choices.getJSONObject(0).getJSONObject("message")
-                message.getString("content")?.trim()
+                message.getString("content").trim()
             } else null
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Parse error", e)

@@ -14,7 +14,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
@@ -209,7 +209,7 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
             prefs.saveConfig(config.copy(enableFloatingBall = isChecked))
             if (isChecked) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(requireContext())) {
-                    AlertDialog.Builder(requireContext())
+                    MaterialAlertDialogBuilder(requireContext())
                         .setTitle("需要悬浮窗权限")
                         .setMessage("开启悬浮球需要在系统设置中授予「显示在其他应用上层」权限，点击确定跳转设置。")
                         .setPositiveButton("去设置") { _, _ ->
@@ -261,7 +261,7 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
                 // 已登录 → 查看或退出
                 val user = GitHubAuthManager.getCachedUser(requireContext())
                 val name = user?.name ?: user?.login ?: "已绑定"
-                AlertDialog.Builder(requireContext())
+                MaterialAlertDialogBuilder(requireContext())
                     .setTitle("GitHub 账号")
                     .setMessage("已通过 GitHub 账号 @${name} 登录\n\n可退出后重新登录其他账号。")
                     .setPositiveButton("重新登录") { _, _ ->
@@ -285,7 +285,7 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
 
         // 关于
         binding.btnAbout.setOnClickListener {
-            AlertDialog.Builder(requireContext())
+            MaterialAlertDialogBuilder(requireContext())
                 .setTitle("关于 LookGm")
                 .setMessage(
                     "LookGm — 全游戏通用 AI 视觉助手\n\n" +
@@ -313,7 +313,7 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
 
         // 隐私说明
         binding.btnPrivacy.setOnClickListener {
-            AlertDialog.Builder(requireContext())
+            MaterialAlertDialogBuilder(requireContext())
                 .setTitle("隐私说明")
                 .setMessage(
                     "LookGm 隐私保护承诺：\n\n" +
@@ -332,7 +332,7 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
 
         // 退出登录
         binding.btnLogout.setOnClickListener {
-            AlertDialog.Builder(requireContext())
+            MaterialAlertDialogBuilder(requireContext())
                 .setTitle("退出登录")
                 .setMessage("确认退出当前账号？本地对局数据不会删除。")
                 .setPositiveButton("退出") { _, _ ->
@@ -351,18 +351,18 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
 
     /** 打开 GitHub OAuth 授权页 */
     private fun startGitHubOAuth() {
+        // ⚠️ 关键：只调用一次 getAuthorizationUrl()，避免重复生成 verifier 导致覆盖
+        val authUrl = GitHubAuthManager.getAuthorizationUrl(requireContext())
         try {
-            val authUrl = GitHubAuthManager.getAuthorizationUrl(requireContext())
             val builder = CustomTabsIntent.Builder()
             builder.setShowTitle(true)
             builder.setColorScheme(CustomTabsIntent.COLOR_SCHEME_DARK)
             val customTabsIntent = builder.build()
             customTabsIntent.launchUrl(requireContext(), Uri.parse(authUrl))
         } catch (e: Exception) {
-            // 回退到普通浏览器
+            // 回退到普通浏览器（使用同一个 authUrl，不再重复生成）
             Toast.makeText(requireContext(), "正在打开授权页面...", Toast.LENGTH_SHORT).show()
-            val browserIntent = Intent(Intent.ACTION_VIEW,
-                Uri.parse(GitHubAuthManager.getAuthorizationUrl(requireContext())))
+            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
             startActivity(browserIntent)
         }
     }

@@ -81,65 +81,79 @@ class VoiceService : Service(), TextToSpeech.OnInitListener {
             }
         }
 
-        // ===== STT (语音识别 — 云端自建，不依赖 Google App) =====
-        var voiceRecognizer: com.gameai.voice.CloudSpeechRecognizer? = null
-        private var sttCallback: ((String) -> Unit)? = null
-        private var sttErrorCallback: ((String) -> Unit)? = null
-        private var sttReadyCallback: (() -> Unit)? = null
-        private var sttRmsCallback: ((Float) -> Unit)? = null
-        private var sttSpeechBeginCallback: (() -> Unit)? = null
-        private var sttSpeechEndCallback: (() -> Unit)? = null
+	// ===== STT（语音识别 — 纯云端方案，不依赖系统引擎） =====
+		var cloudRecognizer: com.gameai.voice.CloudSpeechRecognizer? = null
+		private var sttCallback: ((String) -> Unit)? = null
+		private var sttErrorCallback: ((String) -> Unit)? = null
+		private var sttReadyCallback: (() -> Unit)? = null
+		private var sttRmsCallback: ((Float) -> Unit)? = null
+		private var sttSpeechBeginCallback: (() -> Unit)? = null
+		private var sttSpeechEndCallback: (() -> Unit)? = null
 
-        fun startListening(
-            context: Context,
-            onResult: (String) -> Unit,
-            onError: (String) -> Unit,
-            onReady: (() -> Unit)? = null,
-            onRmsChanged: ((Float) -> Unit)? = null,
-            onSpeechBegin: (() -> Unit)? = null,
-            onSpeechEnd: (() -> Unit)? = null,
-            onSilence: (() -> Unit)? = null
-        ) {
-            sttCallback = onResult
-            sttErrorCallback = onError
-            sttReadyCallback = onReady
-            sttRmsCallback = onRmsChanged
-            sttSpeechBeginCallback = onSpeechBegin
-            sttSpeechEndCallback = onSpeechEnd
-            // 先停旧识别器
-            voiceRecognizer?.stopListening()
-            voiceRecognizer = com.gameai.voice.CloudSpeechRecognizer(
-                context = context.applicationContext,
-                getProviderConfig = {
-                    com.gameai.utils.PreferencesManager.getInstance(context)
-                        .getConversationModelConfig()
-                        ?: com.gameai.utils.PreferencesManager.getInstance(context)
-                            .getCurrentProviderConfig()
-                },
-                onResult = { text -> sttCallback?.invoke(text) },
-                onError = { error -> sttErrorCallback?.invoke(error) },
-                onReady = { sttReadyCallback?.invoke() },
-                onRmsChanged = { rms -> sttRmsCallback?.invoke(rms) },
-                onSpeechBegin = { sttSpeechBeginCallback?.invoke() },
-                onSpeechEnd = { sttSpeechEndCallback?.invoke() },
-                onSilence = { onSilence?.invoke() }
-            )
-            voiceRecognizer?.startListening()
-        }
+		fun startListening(
+			context: Context,
+			getModelConfig: () -> com.gameai.model.ProviderConfig?,
+			onResult: (String) -> Unit,
+			onError: (String) -> Unit,
+			onReady: (() -> Unit)? = null,
+			onRmsChanged: ((Float) -> Unit)? = null,
+			onSpeechBegin: (() -> Unit)? = null,
+			onSpeechEnd: (() -> Unit)? = null,
+			onSilence: (() -> Unit)? = null
+		) {
+			sttCallback = onResult
+			sttErrorCallback = onError
+			sttReadyCallback = onReady
+			sttRmsCallback = onRmsChanged
+			sttSpeechBeginCallback = onSpeechBegin
+			sttSpeechEndCallback = onSpeechEnd
+			stopRecognizer()
+			cloudRecognizer = com.gameai.voice.CloudSpeechRecognizer(
+				context = context.applicationContext,
+				getProviderConfig = getModelConfig,
+				onResult = { text -> sttCallback?.invoke(text) },
+				onError = { error -> sttErrorCallback?.invoke(error) },
+				onReady = { sttReadyCallback?.invoke() },
+				onRmsChanged = { rms -> sttRmsCallback?.invoke(rms) },
+				onSpeechBegin = { sttSpeechBeginCallback?.invoke() },
+				onSpeechEnd = { sttSpeechEndCallback?.invoke() },
+				onSilence = { onSilence?.invoke() }
+			)
+			cloudRecognizer?.startListening()
+		}
 
-        fun stopListening() {
-            voiceRecognizer?.stopListening()
-            voiceRecognizer = null
-            sttCallback = null
-        }
+		private fun stopRecognizer() {
+			cloudRecognizer?.stopListening()
+			cloudRecognizer = null
+		}
 
-        fun isListening(): Boolean = voiceRecognizer != null
+		fun stopListening() {
+			stopRecognizer()
+			sttCallback = null
+		}
+
+		fun isListening(): Boolean = cloudRecognizer != null
 
         fun speak(context: Context, text: String, priority: Int = 0) {
             if (tts == null) init(context)
             speakQueue.offer(QueuedSpeech(text, priority))
             if (isTtsReady && !isSpeaking) processQueue()
         }
+
+        /** 立即停止当前播报并清空队列（打断用） */
+        fun stopSpeaking() {
+            tts?.stop()
+            isSpeaking = false
+            speakQueue.clear()
+        }
+
+        /** 清空TTS队列（取消未播报内容） */
+        fun clearSpeakQueue() {
+            speakQueue.clear()
+        }
+
+        /** 当前是否正在播报 */
+        fun isSpeaking(): Boolean = isSpeaking
 
         fun speakScore(context: Context, score: Int, grade: String) {
             val text = when {

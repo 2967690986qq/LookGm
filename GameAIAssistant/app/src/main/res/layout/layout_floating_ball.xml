@@ -59,6 +59,8 @@
         android:layout_gravity="center"
         android:orientation="vertical"
         android:gravity="center"
+        android:clickable="false"
+        android:focusable="false"
         android:visibility="gone">
 
         <!-- 脉冲点 -->

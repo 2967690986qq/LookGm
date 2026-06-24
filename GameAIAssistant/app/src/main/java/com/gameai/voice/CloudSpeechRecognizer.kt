@@ -41,9 +41,9 @@ class CloudSpeechRecognizer(
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val BUFFER_SIZE = 2048            // 每帧字节数
         private const val SILENCE_TIMEOUT_MS = 3000L    // 静音超时
-        private const val SPEECH_START_THRESHOLD = 500.0 // 语音起始 RMS 阈值
-        private const val SPEECH_END_THRESHOLD = 300.0   // 语音结束 RMS 阈值
-        private const val SPEECH_END_CONSECUTIVE = 8     // 连续静音帧数达到此值判定语音结束
+        private const val SPEECH_START_THRESHOLD = 400.0 // 语音起始 RMS 阈值（降低提高灵敏度）
+        private const val SPEECH_END_THRESHOLD = 250.0   // 语音结束 RMS 阈值
+        private const val SPEECH_END_CONSECUTIVE = 5     // 连续静音帧数（~500ms）判定语音结束（降低以加快响应）
         private const val MAX_RECORD_DURATION_MS = 15000L // 最长录音时长
     }
 
@@ -66,6 +66,10 @@ class CloudSpeechRecognizer(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var currentThread: Thread? = null
+
+    // 防止 STT 失败时无限循环弹 Toast
+    private var failedSttAttempts = 0
+    private var lastSttErrorToast = 0L
 
     // 每次 startListening 创建新线程（Thread 只能 start 一次）
 
@@ -222,11 +226,26 @@ class CloudSpeechRecognizer(
 
                 if (text.isNullOrBlank()) {
                     mainHandler.post {
-                        Log.w(TAG, "未识别到文字")
+                        failedSttAttempts++
+                        val config = getProviderConfig()
+                        val modelHint = config?.modelName ?: "未知"
+                        Log.w(TAG, "STT 返回空（第${failedSttAttempts}次）— 模型 $modelHint 可能不支持音频转文字")
+
+                        // 每 3 次失败弹一次 Toast
+                        if (failedSttAttempts % 3 == 1 &&
+                            System.currentTimeMillis() - lastSttErrorToast > 8000) {
+                            lastSttErrorToast = System.currentTimeMillis()
+                            if (failedSttAttempts >= 6) {
+                                onError("语音转文字已连续失败${failedSttAttempts}次。请检查模型 \"$modelHint\" 是否支持音频转录，或在模型设置中为供应商添加用途为\"语音转文字(stt)\"的模型")
+                            } else {
+                                onError("语音转文字失败。当前STT模型: $modelHint，请确认该模型支持音频转文字")
+                            }
+                        }
                         restartListening()
                     }
                 } else {
                     mainHandler.post {
+                        failedSttAttempts = 0  // 成功后重置计数
                         Log.d(TAG, "识别结果: $text")
                         onResult(text.trim())
                     }
@@ -253,6 +272,16 @@ class CloudSpeechRecognizer(
             try {
                 val baseUrl = normalizeApiUrl(config.baseUrl)
                 val url = "$baseUrl/audio/transcriptions"
+                val sttModel = config.modelName
+
+                // 常见误用检测：chat-only 模型不能做 STT
+                val knownNonSttPrefixes = listOf("Qwen/", "deepseek", "qwen-", "glm-", "ernie-", "gpt-4", "gpt-3")
+                val modelLooksWrong = knownNonSttPrefixes.any { sttModel.lowercase().startsWith(it.lowercase()) }
+                if (modelLooksWrong) {
+                    Log.w(TAG, "⚠️ 模型 \"$sttModel\" 可能不支持音频转文字！请在模型设置中为供应商 ${config.provider.displayName} 绑定一个用途为\"语音转文字(stt)\"的模型")
+                }
+
+                Log.d(TAG, "STT API: POST $url, provider=${config.provider.displayName}, model=$sttModel, audioSize=${wavData.size}")
 
                 val mediaType = "audio/wav".toMediaType()
                 val requestBody = MultipartBody.Builder()
@@ -262,9 +291,7 @@ class CloudSpeechRecognizer(
                         "audio.wav",
                         wavData.toRequestBody(mediaType)
                     )
-                    .addFormDataPart("model", "whisper-1")
-                    .addFormDataPart("language", "zh")
-                    .addFormDataPart("response_format", "json")
+                    .addFormDataPart("model", sttModel)
                     .build()
 
                 var builder = Request.Builder()
@@ -279,35 +306,50 @@ class CloudSpeechRecognizer(
 
                 if (response.isSuccessful) {
                     val body = response.body?.string() ?: ""
-                    // 解析 JSON: {"text": "..."}
+                    Log.d(TAG, "STT 成功, body=${body.take(200)}")
                     val text = org.json.JSONObject(body).optString("text", "")
                     if (text.isBlank()) null else text
                 } else {
                     val errorBody = response.body?.string() ?: ""
-                    Log.e(TAG, "Whisper API error ${response.code}: $errorBody")
+                    val code = response.code
+                    Log.w(TAG, "STT API HTTP $code: ${errorBody.take(300)}")
 
-                    // 404/405 表示不支持 Whisper，用 Base64 + Chat Completions 降级
-                    if (response.code == 404 || response.code == 405) {
-                        Log.w(TAG, "Whisper API 不可用，尝试用 Base64 PCM + Chat 降级")
+                    // 分类错误提示
+                    val errorMsg = when {
+                        code == 400 -> "请求参数错误：模型 $sttModel 可能不支持音频。请在模型设置中为该供应商绑定一个语音转文字(stt)模型"
+                        code == 401 -> "API Key 无效，请检查模型设置"
+                        code == 404 -> "接口不存在：${config.provider.displayName} 不支持 Whisper 音频转录 API"
+                        code == 429 -> "请求过于频繁，请稍后重试"
+                        code >= 500 -> "服务器错误 (HTTP $code)，请稍后重试"
+                        else -> "STT 失败 (HTTP $code): ${errorBody.take(100)}"
+                    }
+                    mainHandler.post { onError(errorMsg) }
+
+                    // 404/405/501 表示不支持 Whisper，用 Chat 降级
+                    if (code == 404 || code == 405 || code == 501) {
+                        Log.w(TAG, "Whisper API 不可用（$code），尝试 Base64 降级方案")
                         return@withContext transcribeViaChatCompletion(wavData, config)
                     }
 
                     null
                 }
             } catch (e: IOException) {
-                Log.e(TAG, "Whisper API call failed", e)
+                Log.e(TAG, "STT 网络错误: ${e.message}")
+                mainHandler.post { onError("网络连接失败: ${e.message}") }
                 null
             }
         }
     }
 
-    /** 降级方案：将 PCM 数据 Base64 编码后发给多模态 Chat API（支持音频输入的模型） */
+    /** 降级方案：将 WAV 音频 Base64 编码后发给多模态 Chat API */
     private suspend fun transcribeViaChatCompletion(wavData: ByteArray, config: ProviderConfig): String? {
         return withContext(Dispatchers.IO) {
             try {
                 val base64Audio = Base64.encodeToString(wavData, Base64.NO_WRAP)
                 val url = "${normalizeApiUrl(config.baseUrl)}/chat/completions"
+                Log.d(TAG, "尝试多模态 STT 降级: $url, model=${config.modelName}, audioSize=${wavData.size}")
 
+                // 方案A: input_audio (OpenAI 原生多模态)
                 val messages = org.json.JSONArray()
                 messages.put(org.json.JSONObject().apply {
                     put("role", "system")
@@ -326,38 +368,101 @@ class CloudSpeechRecognizer(
                     })
                 })
 
-                val body = org.json.JSONObject().apply {
+                var body = org.json.JSONObject().apply {
                     put("model", config.modelName)
                     put("messages", messages)
                     put("max_tokens", 200)
                     put("temperature", 0.0)
                 }.toString()
 
-                val requestBody = body.toRequestBody("application/json; charset=utf-8".toMediaType())
-                val request = Request.Builder()
-                    .url(url)
-                    .post(requestBody)
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("Authorization", "Bearer ${config.apiKey}")
-                    .build()
-
-                val response = httpClient.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val respBody = response.body?.string() ?: ""
-                    val json = org.json.JSONObject(respBody)
-                    val choices = json.getJSONArray("choices")
-                    if (choices.length() > 0) {
-                        val message = choices.getJSONObject(0).getJSONObject("message")
-                        message.getString("content")?.trim()
-                    } else null
-                } else {
-                    Log.e(TAG, "Chat fallback failed: ${response.code}")
-                    null
+                // 先尝试 input_audio 方式
+                var response = sendChatRequest(url, config.apiKey, body)
+                var respBody = response?.first
+                if (response != null && response.second) {
+                    return@withContext parseTranscriptionResult(respBody)
                 }
+
+                // 方案B: 用 image_url 携带 audio data URL（部分视觉模型可用）
+                Log.d(TAG, "input_audio 方式不可用，尝试 image_url 降级")
+                val messages2 = org.json.JSONArray()
+                messages2.put(org.json.JSONObject().apply {
+                    put("role", "system")
+                    put("content", "请将用户提供的语音内容精确转录为中文文字，只输出转录的文字。")
+                })
+                messages2.put(org.json.JSONObject().apply {
+                    put("role", "user")
+                    put("content", org.json.JSONArray().apply {
+                        put(org.json.JSONObject().apply {
+                            put("type", "image_url")
+                            put("image_url", org.json.JSONObject().apply {
+                                put("url", "data:audio/wav;base64,$base64Audio")
+                            })
+                        })
+                        put(org.json.JSONObject().apply {
+                            put("type", "text")
+                            put("text", "请将这段语音转写成文字。")
+                        })
+                    })
+                })
+
+                body = org.json.JSONObject().apply {
+                    put("model", config.modelName)
+                    put("messages", messages2)
+                    put("max_tokens", 200)
+                    put("temperature", 0.0)
+                }.toString()
+
+                response = sendChatRequest(url, config.apiKey, body)
+                respBody = response?.first
+                if (response != null && response.second) {
+                    return@withContext parseTranscriptionResult(respBody)
+                }
+
+                Log.e(TAG, "所有 STT 降级方案均失败")
+                null
             } catch (e: Exception) {
                 Log.e(TAG, "Chat fallback error", e)
                 null
             }
+        }
+    }
+
+    /** 发送 Chat Completion 请求，返回 (body, isSuccess) */
+    private fun sendChatRequest(url: String, apiKey: String, body: String): Pair<String?, Boolean>? {
+        return try {
+            val requestBody = body.toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder()
+                .url(url)
+                .post(requestBody)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Authorization", "Bearer $apiKey")
+                .build()
+            val resp = httpClient.newCall(request).execute()
+            val respStr = resp.body?.string()
+            if (resp.isSuccessful) {
+                respStr?.let { Log.d(TAG, "STT 降级成功: ${it.take(200)}") }
+                Pair(respStr, true)
+            } else {
+                Log.w(TAG, "STT 降级失败 HTTP ${resp.code}: ${respStr?.take(200)}")
+                Pair(respStr, false)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "STT 降级网络异常: ${e.message}")
+            null
+        }
+    }
+
+    private fun parseTranscriptionResult(body: String?): String? {
+        if (body.isNullOrBlank()) return null
+        return try {
+            val json = org.json.JSONObject(body)
+            val choices = json.getJSONArray("choices")
+            if (choices.length() > 0) {
+                choices.getJSONObject(0).getJSONObject("message").getString("content").trim()
+            } else null
+        } catch (e: Exception) {
+            Log.e(TAG, "解析转写结果失败", e)
+            null
         }
     }
 

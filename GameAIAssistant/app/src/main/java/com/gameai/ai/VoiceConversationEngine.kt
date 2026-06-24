@@ -1,41 +1,53 @@
-// VoiceConversationEngine.kt - 语音对话引擎（豆包模式：边看屏幕边聊）
+// VoiceConversationEngine.kt — 实时流式语音对话引擎
+// 仿豆包电话体验：SSE 流式 LLM + 分句 TTS + 打断支持
 package com.gameai.ai
 
-    import android.content.Context
-    import android.content.Intent
-    import android.graphics.Bitmap
-    import android.os.Handler
-    import android.os.Looper
-    import android.widget.Toast
-    import androidx.localbroadcastmanager.content.LocalBroadcastManager
-    import com.gameai.model.ProviderConfig
-    import com.gameai.service.VoiceService
-    import com.gameai.utils.PreferencesManager
-    import kotlinx.coroutines.*
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.gameai.model.ProviderConfig
+import com.gameai.service.VoiceService
+import com.gameai.utils.PreferencesManager
+import kotlinx.coroutines.*
 
 /**
- * 语音对话引擎 — 像豆包一样边看手机屏幕边对话沟通
+ * 实时语音对话引擎 — 仿豆包电话体验
  *
- * 工作流程：
- * 1. 用户点击麦克风 → LISTENING（语音识别）
- * 2. 识别到文字 → PROCESSING（抓取屏幕 → AI 分析 → TTS 播报）
- * 3. AI 回复 → SPEAKING（TTS 朗读）
- * 4. 朗读完毕 → IDLE（等待下次触发）
+ * 核心改进（相比传统的 ASR→LLM→TTS 流水线）：
+ *
+ * 1. SSE 流式 LLM：模型逐 token 生成时实时回调，用户"看到"回复的速度 = 第一个 token 的速度（~500ms）
+ *    而不是等完整回复（~3-5s），消除"等待感"。
+ *
+ * 2. 分句 TTS：检测到句号/感叹号/问号时立即将该句子送入 TTS 播报，后续句子继续流式生成。
+ *    用户听到第一句话的时间 ≈ 第一个句子生成完毕（~1.5s），而不是等所有字生成完。
+ *
+ * 3. 打断 (Barge-in)：用户在 AI 播报时说话 → 立即取消 SSE 流 + 停止 TTS + 开始新的聆听。
+ *    豆包电话的核心体验之一：想打断就能打断。
+ *
+ * 流程：
+ *   LISTENING → 用户说完 → STT 转文字
+ *   PROCESSING → SSE 流式 LLM 逐 token 回调 → 分句发送 TTS
+ *   SPEAKING → TTS 播报中
+ *   任何阶段检测到用户说话 → 打断 → LISTENING
  */
 object VoiceConversationEngine {
 
     private const val TAG = "VoiceConversation"
-    private const val IDLE_TIMEOUT_MS = 15000L   // 空闲 15 秒自动退出对话模式
+    private const val IDLE_TIMEOUT_MS = 15000L
 
     // 状态
     enum class State { IDLE, LISTENING, PROCESSING, SPEAKING }
     @Volatile var state: State = State.IDLE
         private set
 
-    // 回调用消息体（不保留历史）
     data class ChatMessage(
         val role: String,
         val text: String,
+        val isStreaming: Boolean = false,  // true = 流式进行中，文字还会更新
         val timestamp: Long = System.currentTimeMillis()
     )
 
@@ -44,7 +56,14 @@ object VoiceConversationEngine {
     private var idleTimer: Handler? = null
     private var isActive = false
 
-    // 最新屏幕截图（由外部每帧更新）
+    // 打断机制
+    private var currentStreamingCall: CloudAiClient.StreamingCall? = null
+    private var isBargingIn = false
+
+    // 分句 TTS：记录已经发送过 TTS 的句子数，避免重复播报
+    private var spokenSentenceCount = 0
+
+    // 最新屏幕截图
     @Volatile var latestBitmap: Bitmap? = null
 
     // ============================================================
@@ -56,25 +75,23 @@ object VoiceConversationEngine {
     const val ACTION_VOICE_READY = "com.gameai.VOICE_READY"
     const val ACTION_VOICE_SPEECH_BEGIN = "com.gameai.VOICE_SPEECH_BEGIN"
     const val ACTION_VOICE_SPEECH_END = "com.gameai.VOICE_SPEECH_END"
+    const val ACTION_VOICE_STREAMING = "com.gameai.VOICE_STREAMING"  // 流式文字更新
     const val EXTRA_STATE = "voice_state"
     const val EXTRA_ROLE = "role"
     const val EXTRA_TEXT = "text"
     const val EXTRA_TIMESTAMP = "timestamp"
     const val EXTRA_RMS = "rms"
+    const val EXTRA_STREAMING = "is_streaming"
 
-    // ============================================================
-    //  回调
-    // ============================================================
     var onStateChanged: ((State) -> Unit)? = null
     var onMessageReceived: ((ChatMessage) -> Unit)? = null
-    var onUserSpeech: ((String) -> Unit)? = null       // 用户说了什么（显示用）
+    var onUserSpeech: ((String) -> Unit)? = null
 
     // ============================================================
     //  初始化
     // ============================================================
     fun init(context: Context) {
         appContext = context.applicationContext
-        // 先设回调，再 init TTS（确保 listener 创建时就能捕获 onSpeakDone）
         VoiceService.onSpeakDone = {
             if (isActive && state == State.SPEAKING) {
                 startListening()
@@ -86,8 +103,8 @@ object VoiceConversationEngine {
 
     fun release() {
         stopListening()
+        cancelStreamingCall()
         scope.cancel()
-        // 重建 scope 以便后续复用
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         appContext = null
         VoiceService.onSpeakDone = null
@@ -97,62 +114,74 @@ object VoiceConversationEngine {
     //  启动/停止语音对话
     // ============================================================
 
-    /** 启动语音对话模式 */
     fun startConversation() {
         val ctx = appContext ?: return
         if (isActive) return
 
-        // ===== 启动前诊断 =====
         val diagError = diagnosePrerequisites(ctx)
         if (diagError != null) {
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(ctx, "语音对话不可用: $diagError", Toast.LENGTH_LONG).show()
             }
             android.util.Log.e(TAG, "语音对话启动失败: $diagError")
-            broadcastMessage("system", "⚠️ $diagError")
+            broadcastMessage("system", "\u26A0\uFE0F $diagError")
             return
         }
 
         isActive = true
+        spokenSentenceCount = 0
+        isBargingIn = false
         transitionState(State.IDLE)
-
-        // 自动开始聆听
         startListening()
     }
 
-    /** 停止语音对话模式 */
     fun stopConversation() {
         isActive = false
         stopListening()
+        cancelStreamingCall()
+        VoiceService.stopSpeaking()
+        VoiceService.clearSpeakQueue()
+        spokenSentenceCount = 0
         transitionState(State.IDLE)
         cancelIdleTimer()
     }
 
-    /** 是否处于对话模式 */
     fun isConversationActive(): Boolean = isActive
 
+    // ============================================================
+    //  打断逻辑
+    // ============================================================
+
     /**
-     * 启动前诊断：检查所有前置条件
-     * @return null 表示一切正常，否则返回错误描述
+     * 执行打断：取消 SSE 流 + 停止 TTS
+     * 在检测到用户说话时调用（VAD speech_begin 事件）
      */
-    private fun diagnosePrerequisites(context: Context): String? {
-        // 1. 检查录音权限
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            if (context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                return "缺少录音权限，请在设置中授权"
-            }
-        }
-        // 2. 检查 AI 模型配置（云端识别依赖 API）
-        val config = getModelConfig()
-        if (config == null || config.apiKey.isBlank()) {
-            return "未配置 AI 模型，请在\"模型设置\"中配置 API Key"
-        }
-        return null
+    private fun performBargeIn() {
+        if (state != State.SPEAKING && state != State.PROCESSING) return
+        android.util.Log.i(TAG, "执行打断 — 用户开始说话，取消当前 AI 回复")
+        isBargingIn = true
+
+        // 1. 取消 SSE 流式请求
+        cancelStreamingCall()
+
+        // 2. 停止 TTS 播报 + 清空队列
+        VoiceService.stopSpeaking()
+        VoiceService.clearSpeakQueue()
+
+        // 3. 重置分句计数
+        spokenSentenceCount = 0
+
+        // 4. 通知 UI 流式结束
+        broadcastStreamingEnd()
+    }
+
+    private fun cancelStreamingCall() {
+        currentStreamingCall?.cancel()
+        currentStreamingCall = null
     }
 
     // ============================================================
-    //  语音识别
+    //  语音识别（纯云端 STT）
     // ============================================================
 
     private fun startListening() {
@@ -161,61 +190,75 @@ object VoiceConversationEngine {
 
         transitionState(State.LISTENING)
 
-        VoiceService.startListening(
-            context = ctx,
-            onResult = { text ->
-                onUserSpeech?.invoke(text)
-                broadcastMessage("user", text)
-                onMessageReceived?.invoke(ChatMessage("user", text))
+        // STT 成功 → 交给 AI 处理
+        val sttOnResult: (String) -> Unit = { text ->
+            onUserSpeech?.invoke(text)
+            broadcastMessage("user", text)
+            onMessageReceived?.invoke(ChatMessage("user", text))
+            VoiceService.stopListening()
 
-                // 停止聆听，进入处理
-                VoiceService.stopListening()
-                transitionState(State.PROCESSING)
+            // 如果检测到打断，清掉之前的流式 AI 消息广播
+            if (isBargingIn) {
+                broadcastStreamingEnd()
+                isBargingIn = false
+            }
 
-                // 处理用户输入
-                processUserInput(text)
-            },
-            onError = { error ->
-                android.util.Log.w(TAG, "语音识别错误: $error")
-                // 显示 Toast 让用户知道
-                Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(ctx, "语音识别: $error", Toast.LENGTH_SHORT).show()
-                }
-                // 先停旧识别器，再重试
-                VoiceService.stopListening()
-                if (isActive && state == State.LISTENING) {
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (isActive) startListening()
-                    }, 1000)
-                }
-            },
-            onReady = ready@{
-                // 识别器就绪，通知UI
-                val c = appContext ?: return@ready
-                LocalBroadcastManager.getInstance(c)
-                    .sendBroadcast(Intent(ACTION_VOICE_READY))
-            },
-            onRmsChanged = rmsChanged@{ rmsValue ->
-                // 音量变化，广播给悬浮球
-                val c = appContext ?: return@rmsChanged
-                Intent(ACTION_VOICE_RMS).apply {
-                    putExtra(EXTRA_RMS, rmsValue)
-                }.also {
-                    LocalBroadcastManager.getInstance(c).sendBroadcast(it)
-                }
-            },
-            onSpeechBegin = speechBegin@{
-                val c = appContext ?: return@speechBegin
+            transitionState(State.PROCESSING)
+            processUserInputStreaming(text)
+        }
+
+        val sttOnError: (String) -> Unit = { error ->
+            android.util.Log.w(TAG, "STT 错误: $error")
+            VoiceService.stopListening()
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(ctx, error, Toast.LENGTH_SHORT).show()
+            }
+            if (isActive && state == State.LISTENING) {
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (isActive) startListening()
+                }, 1500)
+            }
+        }
+
+        val sttOnSpeechBegin: () -> Unit = {
+            // 如果 AI 正在说话，执行打断
+            if (state == State.SPEAKING || state == State.PROCESSING) {
+                performBargeIn()
+            }
+            appContext?.let { c ->
                 LocalBroadcastManager.getInstance(c)
                     .sendBroadcast(Intent(ACTION_VOICE_SPEECH_BEGIN))
+            }
+        }
+
+        VoiceService.startListening(
+            context = ctx,
+            getModelConfig = { getSttConfig() },
+            onResult = sttOnResult,
+            onError = sttOnError,
+            onReady = {
+                appContext?.let { c ->
+                    LocalBroadcastManager.getInstance(c)
+                        .sendBroadcast(Intent(ACTION_VOICE_READY))
+                }
             },
-            onSpeechEnd = speechEnd@{
-                val c = appContext ?: return@speechEnd
-                LocalBroadcastManager.getInstance(c)
-                    .sendBroadcast(Intent(ACTION_VOICE_SPEECH_END))
+            onRmsChanged = { rms ->
+                appContext?.let { c ->
+                    Intent(ACTION_VOICE_RMS).apply {
+                        putExtra(EXTRA_RMS, rms)
+                    }.also {
+                        LocalBroadcastManager.getInstance(c).sendBroadcast(it)
+                    }
+                }
+            },
+            onSpeechBegin = sttOnSpeechBegin,
+            onSpeechEnd = {
+                appContext?.let { c ->
+                    LocalBroadcastManager.getInstance(c)
+                        .sendBroadcast(Intent(ACTION_VOICE_SPEECH_END))
+                }
             },
             onSilence = {
-                // 静默超时：重启监听，确保麦克风持续工作
                 android.util.Log.d(TAG, "静默超时，重启监听")
                 if (isActive) {
                     VoiceService.stopListening()
@@ -232,84 +275,165 @@ object VoiceConversationEngine {
     }
 
     // ============================================================
-    //  AI 处理（核心：截图 + 语音 → AI → TTS）
+    //  SSE 流式 AI 处理 + 分句 TTS
     // ============================================================
 
-    private fun processUserInput(text: String) {
-        scope.launch {
-            try {
-                // 获取当前屏幕截图
-                val bitmap = latestBitmap
-                val config = getModelConfig()
+    private fun processUserInputStreaming(text: String) {
+        val bitmap = latestBitmap
+        val config = getConversationConfig()
 
-                if (config == null) {
-                    val reply = "请先在设置中配置 AI 模型和 API Key"
-                    appContext?.let {
-                        Handler(Looper.getMainLooper()).post {
-                            Toast.makeText(it, "未配置 AI 模型，请在设置中填写 API Key", Toast.LENGTH_LONG).show()
+        if (config == null) {
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(appContext, "未配置对话模型", Toast.LENGTH_LONG).show()
+            }
+            handleAssistantReplyFallback("请先在模型设置中配置对话模型")
+            return
+        }
+
+        spokenSentenceCount = 0
+        val accTextRef = StringBuilder()
+
+        currentStreamingCall = CloudAiClient.converseStreaming(
+            bitmap = bitmap,
+            config = config,
+            userMessage = text,
+            onToken = { accumulatedText ->
+                accTextRef.clear()
+                accTextRef.append(accumulatedText)
+
+                // 广播流式文字更新（UI 实时打字效果）
+                broadcastStreamingUpdate(accumulatedText, true)
+
+                // 分句 TTS：检测到句子结束符，立即播报该句子
+                val newSentences = extractNewSentences(accumulatedText)
+                if (newSentences > spokenSentenceCount) {
+                    val sentences = splitSentences(accumulatedText)
+                    // 播报未播放的句子
+                    for (i in spokenSentenceCount until newSentences) {
+                        if (i < sentences.size) {
+                            val s = sentences[i].trim()
+                            if (s.isNotEmpty()) {
+                                VoiceService.speak(appContext!!, s)
+                            }
                         }
                     }
-                    handleAssistantReply(reply)
-                    return@launch
+                    spokenSentenceCount = newSentences
+                }
+            },
+            onComplete = { fullText ->
+                android.util.Log.d(TAG, "SSE 流完成: ${fullText.take(50)}...")
+                currentStreamingCall = null
+
+                // 流结束 → 处理最终结果
+                if (isBargingIn) {
+                    isBargingIn = false
+                    return@converseStreaming
                 }
 
-                // 调用 AI 多轮对话
-                val reply = CloudAiClient.converse(
-                    bitmap = bitmap,
-                    config = config,
-                    userMessage = text
-                )
-
-                if (reply != null && reply.isNotBlank()) {
-                    handleAssistantReply(reply)
-                } else {
-                    handleAssistantReply("抱歉，AI 暂时无法回应，请稍后再试")
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                // 协程被取消（如调用 release）→ 恢复状态
-                android.util.Log.w(TAG, "AI处理被取消，恢复状态")
-                Handler(Looper.getMainLooper()).post {
-                    if (state == State.PROCESSING) {
-                        transitionState(State.IDLE)
+                // 播报剩余未播放的句子
+                val sentences = splitSentences(fullText)
+                for (i in spokenSentenceCount until sentences.size) {
+                    val s = sentences[i].trim()
+                    if (s.isNotEmpty()) {
+                        VoiceService.speak(appContext!!, s)
                     }
                 }
-                throw e  // 重新抛出以正确传播取消
-            } catch (e: Exception) {
-                android.util.Log.e(TAG, "AI处理失败", e)
-                handleAssistantReply("抱歉，处理出错了：${e.message}")
+
+                // 广播完整消息
+                broadcastMessage("assistant", fullText)
+                onMessageReceived?.invoke(ChatMessage("assistant", fullText))
+                broadcastStreamingEnd()
+
+                // TTS 播报完成后回到 LISTENING（由 VoiceService.onSpeakDone 触发）
+                // 但如果没有任何句子被播报，直接进入 SPEAKING 然后回到 LISTENING
+                if (spokenSentenceCount == 0 && sentences.isEmpty()) {
+                    handleAssistantReplyFallback("（AI 未返回有效回复）")
+                }
+            },
+            onError = { error ->
+                android.util.Log.e(TAG, "SSE 错误: $error")
+                currentStreamingCall = null
+                broadcastStreamingEnd()
+
+                if (!isBargingIn) {
+                    handleAssistantReplyFallback("抱歉，处理出错了：$error")
+                }
+                isBargingIn = false
             }
-        }
+        )
     }
 
-    private fun handleAssistantReply(text: String) {
+    private fun handleAssistantReplyFallback(text: String) {
         broadcastMessage("assistant", text)
         onMessageReceived?.invoke(ChatMessage("assistant", text))
-
-        // TTS 播报（完成回调由 VoiceService.onSpeakDone 处理）
         transitionState(State.SPEAKING)
         val ctx = appContext ?: return
         VoiceService.speak(ctx, text)
     }
 
     // ============================================================
-    //  状态管理
+    //  分句工具
     // ============================================================
 
-    private fun transitionState(newState: State) {
-        state = newState
-        onStateChanged?.invoke(newState)
+    /** 从累积文本中提取已完成的句子数 */
+    private fun extractNewSentences(text: String): Int {
+        var count = 0
+        var lastEnd = 0
+        for (i in text.indices) {
+            val c = text[i]
+            if (c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '\n') {
+                val seg = text.substring(lastEnd, i).trim()
+                if (seg.isNotEmpty()) {
+                    count++
+                }
+                lastEnd = i + 1
+            }
+        }
+        return count
+    }
 
-        // 广播状态变化
+    /** 按句子切分文本 */
+    private fun splitSentences(text: String): List<String> {
+        val result = mutableListOf<String>()
+        val sb = StringBuilder()
+        for (c in text) {
+            sb.append(c)
+            if (c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '\n') {
+                val s = sb.toString().trim()
+                if (s.isNotEmpty()) {
+                    result.add(s)
+                }
+                sb.clear()
+            }
+        }
+        val remaining = sb.toString().trim()
+        if (remaining.isNotEmpty()) {
+            result.add(remaining)
+        }
+        return result
+    }
+
+    // ============================================================
+    //  广播工具
+    // ============================================================
+
+    private fun broadcastStreamingUpdate(text: String, isStreaming: Boolean) {
         val ctx = appContext ?: return
-        val intent = Intent(ACTION_VOICE_STATE).apply {
-            putExtra(EXTRA_STATE, newState.name)
+        val intent = Intent(ACTION_VOICE_STREAMING).apply {
+            putExtra(EXTRA_TEXT, text)
+            putExtra(EXTRA_STREAMING, isStreaming)
+            putExtra(EXTRA_TIMESTAMP, System.currentTimeMillis())
         }
         LocalBroadcastManager.getInstance(ctx).sendBroadcast(intent)
+    }
 
-        // 空闲计时器
-        if (newState == State.IDLE && isActive) {
-            resetIdleTimer()
+    private fun broadcastStreamingEnd() {
+        val ctx = appContext ?: return
+        val intent = Intent(ACTION_VOICE_STREAMING).apply {
+            putExtra(EXTRA_TEXT, "")
+            putExtra(EXTRA_STREAMING, false)
         }
+        LocalBroadcastManager.getInstance(ctx).sendBroadcast(intent)
     }
 
     private fun broadcastMessage(role: String, text: String) {
@@ -320,6 +444,30 @@ object VoiceConversationEngine {
             putExtra(EXTRA_TIMESTAMP, System.currentTimeMillis())
         }
         LocalBroadcastManager.getInstance(ctx).sendBroadcast(intent)
+    }
+
+    // ============================================================
+    //  状态管理
+    // ============================================================
+
+    private fun transitionState(newState: State) {
+        state = newState
+        onStateChanged?.invoke(newState)
+
+        val ctx = appContext ?: return
+        val intent = Intent(ACTION_VOICE_STATE).apply {
+            putExtra(EXTRA_STATE, newState.name)
+        }
+        LocalBroadcastManager.getInstance(ctx).sendBroadcast(intent)
+
+        if (newState == State.IDLE && isActive) {
+            resetIdleTimer()
+        }
+
+        // 进入 SPEAKING 后重新启用打断检测
+        if (newState == State.SPEAKING) {
+            isBargingIn = false
+        }
     }
 
     private fun resetIdleTimer() {
@@ -336,13 +484,51 @@ object VoiceConversationEngine {
     }
 
     // ============================================================
-    //  配置
+    //  启动前诊断
     // ============================================================
 
-    private fun getModelConfig(): ProviderConfig? {
+    private fun diagnosePrerequisites(context: Context): String? {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            if (context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                return "缺少录音权限，请在设置中授权"
+            }
+        }
+
+        val sttConfig = getSttConfig()
+        if (sttConfig == null || sttConfig.apiKey.isBlank()) {
+            return "未配置 STT 语音识别模型，请在\"模型设置\"中绑定一个用途为\"语音转文字(stt)\"的模型"
+        }
+        android.util.Log.i(TAG, "STT 模型: ${sttConfig.modelName} (${sttConfig.provider.displayName})")
+
+        val convConfig = getConversationConfig()
+        if (convConfig == null || convConfig.apiKey.isBlank()) {
+            return "未配置对话模型，请在\"模型设置\"中配置 API Key"
+        }
+        android.util.Log.i(TAG, "对话模型: ${convConfig.modelName} (${convConfig.provider.displayName})")
+
+        return null
+    }
+
+    // ============================================================
+    //  配置（双模型分离）
+    // ============================================================
+
+    private fun getConversationConfig(): ProviderConfig? {
         val ctx = appContext ?: return null
         val prefs = PreferencesManager.getInstance(ctx)
         val config = prefs.getConversationModelConfig() ?: prefs.getCurrentProviderConfig()
+
+        if (prefs.getModelMode() == com.gameai.model.ModelMode.CLOUD && config.apiKey.isBlank()) {
+            return null
+        }
+        return config
+    }
+
+    private fun getSttConfig(): ProviderConfig? {
+        val ctx = appContext ?: return null
+        val prefs = PreferencesManager.getInstance(ctx)
+        val config = prefs.getSttModelConfig() ?: prefs.getCurrentProviderConfig()
 
         if (prefs.getModelMode() == com.gameai.model.ModelMode.CLOUD && config.apiKey.isBlank()) {
             return null
