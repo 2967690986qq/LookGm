@@ -156,7 +156,8 @@ class SettingsActivity : AppCompatActivity() {
 
         // 关于
         findViewById<TextView>(R.id.btn_about).setOnClickListener {
-            Toast.makeText(this, "全游戏AI助手 v1.0\nBuild: 20240623\n开源项目 - MIT协议", Toast.LENGTH_LONG).show()
+            val info = this.packageManager.getPackageInfo(this.packageName, 0)
+            Toast.makeText(this, "LookGm 全游戏AI助手 v${info.versionName}\nBuild: ${info.versionCode}\n开源项目 - MIT协议", Toast.LENGTH_LONG).show()
         }
     }
 

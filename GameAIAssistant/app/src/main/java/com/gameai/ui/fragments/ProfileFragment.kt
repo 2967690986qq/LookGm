@@ -134,8 +134,11 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
         val deviceId = getOrCreateDeviceId()
         binding.tvDeviceId.text = deviceId
 
-        // 版本号
-        binding.tvCurrentVersion.text = "v${BuildConfig.VERSION_NAME}"
+        // 版本号 — 从 PackageManager 读取真实安装版本（与检测更新同源，避免不一致）
+        val realVersion = try {
+            requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName ?: "0"
+        } catch (e: Exception) { "0" }
+        binding.tvCurrentVersion.text = "v$realVersion"
     }
 
     private fun getOrCreateDeviceId(): String {
@@ -249,9 +252,12 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
         binding.btnCheckUpdate.setOnClickListener {
             binding.tvCurrentVersion.text = "检测中..."
             UpdateManager.checkManually(requireContext())
-            // 1秒后恢复版本号显示（防止死等）
+            // 8秒后恢复版本号显示（防止死等）
             binding.tvCurrentVersion.postDelayed({
-                binding.tvCurrentVersion.text = "v${BuildConfig.VERSION_NAME}"
+                val ver = try {
+                    requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName ?: "0"
+                } catch (e: Exception) { "0" }
+                binding.tvCurrentVersion.text = "v$ver"
             }, 8000)
         }
 
@@ -285,12 +291,18 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
 
         // 关于
         binding.btnAbout.setOnClickListener {
+            val realVer = try {
+                requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName ?: "0"
+            } catch (e: Exception) { "0" }
+            val realCode = try {
+                requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionCode
+            } catch (e: Exception) { 0 }
             MaterialAlertDialogBuilder(requireContext())
                 .setTitle("关于 LookGm")
                 .setMessage(
                     "LookGm — 全游戏通用 AI 视觉助手\n\n" +
-                    "版本：${BuildConfig.VERSION_NAME}\n" +
-                    "Build：${BuildConfig.VERSION_CODE}\n\n" +
+                    "版本：$realVer\n" +
+                    "Build：$realCode\n\n" +
                     "核心特性：\n" +
                     "• 纯视觉分析，不读游戏内存（合规）\n" +
                     "• 双模型架构：内网本地模型 + 全网云端 API\n" +
