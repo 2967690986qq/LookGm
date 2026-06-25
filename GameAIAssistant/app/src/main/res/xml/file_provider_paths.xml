@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- APK 下载目录 -->
+    <!-- 外部私有文件目录（getExternalFilesDir 下的任何路径） -->
     <external-files-path
         name="apk_downloads"
-        path="updates/" />
-    <!-- 缓存目录备用 -->
+        path="." />
+    <!-- 内部私有缓存（context.filesDir） -->
+    <files-path
+        name="app_files"
+        path="." />
+    <!-- 内部缓存目录 -->
     <cache-path
         name="cached_apks"
-        path="updates/" />
+        path="." />
 </paths>
