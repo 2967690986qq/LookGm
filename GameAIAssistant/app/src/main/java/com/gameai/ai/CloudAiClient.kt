@@ -23,6 +23,8 @@ import java.util.concurrent.locks.ReentrantLock
  *
  * 并发安全：全局 ReentrantLock 防止多个协程同时调用 API
  * 双模型支持：语音对话和分析可分别配置不同模型
+ *
+ * v2 新增：UsageTracker 用量追踪 + SkillManager 技能化提示词
  */
 object CloudAiClient {
 
@@ -40,6 +42,10 @@ object CloudAiClient {
 
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
+    /** 当前注入的游戏名/英雄名，供技能系统动态构建提示词 */
+    @Volatile var currentGameName: String = ""
+    @Volatile var currentHeroName: String = ""
+
     /**
      * 同步调用 AI 接口分析游戏画面（在后台线程中调用）
      * @param bitmap 当前屏幕截图
@@ -50,13 +56,23 @@ object CloudAiClient {
     suspend fun analyze(bitmap: Bitmap, config: ProviderConfig, systemPrompt: String): String? {
         return withContext(Dispatchers.IO) {
             apiLock.lock()
+            val startTime = System.currentTimeMillis()
             try {
+                // 动态注入技能提示词
+                val enhancedPrompt = buildEnhancedSystemPrompt(config.modelName, "analysis", systemPrompt)
                 val base64Image = bitmapToBase64(bitmap)
-                val requestBody = buildRequestBody(config.modelName, systemPrompt, base64Image)
+                val requestBody = buildRequestBody(config.modelName, enhancedPrompt, base64Image)
                 val response = callApi(config, requestBody)
-                parseResponse(response)
+                val result = parseResponse(response)
+                val latency = System.currentTimeMillis() - startTime
+                // 追踪用量
+                val promptTokens = UsageTracker.estimateTokens(enhancedPrompt) + UsageTracker.estimateTokens("分析当前画面")
+                val completionTokens = UsageTracker.estimateTokens(result ?: "")
+                UsageTracker.record(config.provider.name, config.modelName, "analysis", promptTokens, completionTokens, latency)
+                result
             } catch (e: Exception) {
                 e.printStackTrace()
+                UsageTracker.record(config.provider.name, config.modelName, "analysis", 0, 0, 0, false)
                 null
             } finally {
                 apiLock.unlock()
@@ -78,12 +94,19 @@ object CloudAiClient {
     ): String? {
         return withContext(Dispatchers.IO) {
             apiLock.lock()
+            val startTime = System.currentTimeMillis()
             try {
                 val requestBody = buildConversationBody(config.modelName, userMessage, bitmap)
                 val response = callApi(config, requestBody)
-                parseResponse(response)
+                val result = parseResponse(response)
+                val latency = System.currentTimeMillis() - startTime
+                val promptTokens = UsageTracker.estimateTokens(userMessage) + 200  // system prompt ~200 tokens
+                val completionTokens = UsageTracker.estimateTokens(result ?: "")
+                UsageTracker.record(config.provider.name, config.modelName, "conversation", promptTokens, completionTokens, latency)
+                result
             } catch (e: Exception) {
                 e.printStackTrace()
+                UsageTracker.record(config.provider.name, config.modelName, "conversation", 0, 0, 0, false)
                 null
             } finally {
                 apiLock.unlock()
@@ -122,6 +145,7 @@ object CloudAiClient {
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
         scope.launch {
+            val startTime = System.currentTimeMillis()
             try {
                 val body = buildConversationBodyStreaming(config.modelName, userMessage, bitmap)
 
@@ -144,6 +168,7 @@ object CloudAiClient {
                     Handler(Looper.getMainLooper()).post {
                         onError("AI 请求失败 (HTTP ${response.code})")
                     }
+                    UsageTracker.record(config.provider.name, config.modelName, "conversation", 0, 0, 0, false)
                     return@launch
                 }
 
@@ -187,6 +212,13 @@ object CloudAiClient {
 
                 response.close()
                 val fullText = accumulated.toString()
+
+                // 追踪用量
+                val latency = System.currentTimeMillis() - startTime
+                val promptTokens = UsageTracker.estimateTokens(userMessage) + 200
+                val completionTokens = UsageTracker.estimateTokens(fullText)
+                UsageTracker.record(config.provider.name, config.modelName, "conversation", promptTokens, completionTokens, latency)
+
                 if (fullText.isNotBlank() && !call.isCancelled) {
                     Handler(Looper.getMainLooper()).post {
                         onComplete(fullText)
@@ -238,8 +270,42 @@ object CloudAiClient {
     }
 
     // ============================================================
-    //  API 调用
+    //  Skill-enhanced 系统提示词（参考 OpenClaw 技能注入机制）
     // ============================================================
+
+    /**
+     * 构建增强版系统提示词 = 基础提示词 + 技能知识 + 用户画像 + 游戏上下文
+     * 参考 OpenClaw: 技能以紧凑片段形式注入，不重复、不冗余
+     */
+    private suspend fun buildEnhancedSystemPrompt(modelName: String, purpose: String, basePrompt: String): String {
+        val sb = StringBuilder()
+        sb.append(basePrompt)
+
+        // 注入技能知识
+        if (currentGameName.isNotBlank()) {
+            try {
+                val skillContext = SkillManager.buildSkillContext(currentGameName, currentHeroName)
+                if (skillContext.isNotBlank()) {
+                    sb.append(skillContext)
+                }
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "Skill context build failed", e)
+            }
+        }
+
+        // 注入用户画像
+        try {
+            val userProfile = MemoryManager.buildUserProfileContext()
+            if (userProfile.isNotBlank()) {
+                sb.append("\n\n")
+                sb.append(userProfile)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "User profile build failed", e)
+        }
+
+        return sb.toString()
+    }
 
     private fun callApi(config: ProviderConfig, body: String): String? {
         val url = normalizeApiUrl(config.baseUrl) + "/chat/completions"
@@ -318,17 +384,15 @@ object CloudAiClient {
     /**
      * 构建语音对话请求体（多轮上下文 + 截图 + 语音文字）
      */
-    private fun buildConversationBody(
+    private suspend fun buildConversationBody(
         model: String,
         userMessage: String,
         bitmap: Bitmap?
     ): String {
         val messages = JSONArray()
 
-        // System message — 口语化助手角色
-        messages.put(JSONObject().apply {
-            put("role", "system")
-            put("content", """
+        // 动态构建系统提示词
+        val baseSystemPrompt = """
 你是一个游戏语音助手，名叫"小G"。你正在通过语音和玩家对话。玩家在玩王者荣耀，你能看到他的手机屏幕。
 
 说话要求：
@@ -343,7 +407,13 @@ object CloudAiClient {
 - 能看到玩家屏幕上的游戏画面
 - 可以分析局势、阵容、装备、小地图
 - 给出实时战术指导
-""".trimIndent())
+""".trimIndent()
+
+        val systemPrompt = buildEnhancedSystemPrompt(model, "conversation", baseSystemPrompt)
+
+        messages.put(JSONObject().apply {
+            put("role", "system")
+            put("content", systemPrompt)
         })
 
         // 当前用户消息（含截图）
@@ -381,16 +451,14 @@ object CloudAiClient {
     }
 
     /** 构建流式语音对话请求体（SSE，stream=true） */
-    private fun buildConversationBodyStreaming(
+    private suspend fun buildConversationBodyStreaming(
         model: String,
         userMessage: String,
         bitmap: Bitmap?
     ): String {
         val messages = JSONArray()
 
-        messages.put(JSONObject().apply {
-            put("role", "system")
-            put("content", """
+        val baseSystemPrompt = """
 你是一个游戏语音助手，名叫"小G"。你正在通过语音和玩家对话。玩家在玩王者荣耀，你能看到他的手机屏幕。
 
 说话要求：
@@ -405,7 +473,13 @@ object CloudAiClient {
 - 能看到玩家屏幕上的游戏画面
 - 可以分析局势、阵容、装备、小地图
 - 给出实时战术指导
-""".trimIndent())
+""".trimIndent()
+
+        val systemPrompt = buildEnhancedSystemPrompt(model, "conversation", baseSystemPrompt)
+
+        messages.put(JSONObject().apply {
+            put("role", "system")
+            put("content", systemPrompt)
         })
 
         if (bitmap != null) {

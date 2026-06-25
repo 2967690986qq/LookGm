@@ -7,9 +7,21 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.gameai.common.config.AppConfig
 
-@Database(entities = [MatchEntity::class], version = AppConfig.DB_VERSION, exportSchema = false)
+@Database(
+    entities = [
+        MatchEntity::class,
+        SkillEntity::class,
+        UsageEntity::class,
+        SessionMemoryEntity::class
+    ],
+    version = AppConfig.DB_VERSION,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun matchDao(): MatchDao
+    abstract fun skillDao(): SkillDao
+    abstract fun usageDao(): UsageDao
+    abstract fun sessionMemoryDao(): SessionMemoryDao
 
     companion object {
         @Volatile

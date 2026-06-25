@@ -41,10 +41,14 @@ class CloudSpeechRecognizer(
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val BUFFER_SIZE = 2048            // 每帧字节数
         private const val SILENCE_TIMEOUT_MS = 3000L    // 静音超时
-        private const val SPEECH_START_THRESHOLD = 400.0 // 语音起始 RMS 阈值（降低提高灵敏度）
-        private const val SPEECH_END_THRESHOLD = 250.0   // 语音结束 RMS 阈值
-        private const val SPEECH_END_CONSECUTIVE = 5     // 连续静音帧数（~500ms）判定语音结束（降低以加快响应）
-        private const val MAX_RECORD_DURATION_MS = 15000L // 最长录音时长
+        private const val SPEECH_START_THRESHOLD = 400.0   // 语音起始 RMS 阈值
+        private const val SPEECH_END_THRESHOLD = 250.0     // 语音结束 RMS 阈值
+        private const val SPEECH_END_CONSECUTIVE = 5       // 连续静音帧数（~500ms）判定语音结束
+        private const val MAX_RECORD_DURATION_MS = 15000L  // 最长录音时长
+
+        // v3.0: 自适应 VAD 参数
+        private const val NOISE_FLOOR_WINDOW = 20      // 计算噪声底噪的帧数窗口
+        private const val ADAPTIVE_FACTOR = 1.8          // 语音起始阈值 = 噪声底噪 × 该系数
     }
 
     private var audioRecord: AudioRecord? = null
@@ -56,6 +60,12 @@ class CloudSpeechRecognizer(
     private var silenceFrameCount = 0
     private var speechFrameCount = 0
     private var rmsDbHelper = 1.0  // 用于平滑 RMS
+
+    // v3.0: 自适应 VAD — 动态计算噪声底噪
+    private val recentNoiseLevels = mutableListOf<Double>()
+    private var estimatedNoiseFloor = 100.0  // 初始估计底噪
+    private var adaptiveSpeechStart = SPEECH_START_THRESHOLD.toDouble()
+    private var adaptiveSpeechEnd = SPEECH_END_THRESHOLD.toDouble()
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -111,6 +121,12 @@ class CloudSpeechRecognizer(
             speechFrameCount = 0
             accumulatedAudio.reset()
 
+            // v3.0: 重置自适应 VAD
+            recentNoiseLevels.clear()
+            estimatedNoiseFloor = 100.0
+            adaptiveSpeechStart = SPEECH_START_THRESHOLD.toDouble()
+            adaptiveSpeechEnd = SPEECH_END_THRESHOLD.toDouble()
+
             mainHandler.post {
                 onReady()
                 Log.d(TAG, "云端语音识别已启动")
@@ -162,26 +178,42 @@ class CloudSpeechRecognizer(
                 accumulatedAudio.write(buffer, 0, bytesRead)
             }
 
-            // 简单 VAD
+            // v3.0: 自适应 VAD — 跟踪噪声底噪，动态调整阈值
             if (!isSpeechActive) {
-                // 等待语音开始
-                if (rmsDbHelper > SPEECH_START_THRESHOLD) {
+                // 在安静阶段收集噪声样本
+                recentNoiseLevels.add(rms)
+                if (recentNoiseLevels.size > NOISE_FLOOR_WINDOW) {
+                    recentNoiseLevels.removeAt(0)
+                }
+                if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
+                    // 计算中位数作为底噪估计
+                    val sorted = recentNoiseLevels.sorted()
+                    estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
+                    adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR).coerceAtLeast(SPEECH_START_THRESHOLD.toDouble())
+                    adaptiveSpeechEnd = (estimatedNoiseFloor * 1.4).coerceAtLeast(SPEECH_END_THRESHOLD.toDouble())
+                }
+            }
+
+            // VAD 状态机
+            if (!isSpeechActive) {
+                // 等待语音开始（使用自适应阈值）
+                if (rmsDbHelper > adaptiveSpeechStart) {
                     speechFrameCount++
                     if (speechFrameCount >= 3) {
                         isSpeechActive = true
                         silenceFrameCount = 0
                         mainHandler.post { onSpeechBegin() }
-                        Log.d(TAG, "检测到语音开始")
+                        Log.d(TAG, "语音开始 (RMS=${rmsDbHelper.toInt()}>阈值=${adaptiveSpeechStart.toInt()}, 底噪=${estimatedNoiseFloor.toInt()})")
                     }
                 } else {
-                    speechFrameCount = 0
+                    speechFrameCount = maxOf(speechFrameCount - 1, 0)  // 平滑衰减
                 }
             } else {
-                // 检测语音结束
-                if (rmsDbHelper < SPEECH_END_THRESHOLD) {
+                // 检测语音结束（使用自适应阈值）
+                if (rmsDbHelper < adaptiveSpeechEnd) {
                     silenceFrameCount++
                     if (silenceFrameCount >= SPEECH_END_CONSECUTIVE) {
-                        Log.d(TAG, "检测到语音结束")
+                        Log.d(TAG, "语音结束 (RMS=${rmsDbHelper.toInt()}<阈值=${adaptiveSpeechEnd.toInt()}, 静音帧=$silenceFrameCount)")
                         mainHandler.post { onSpeechEnd() }
                         finishSpeech()
                         return

@@ -1,5 +1,6 @@
 // VoiceConversationEngine.kt — 实时流式语音对话引擎
 // 仿豆包电话体验：SSE 流式 LLM + 分句 TTS + 打断支持
+// v3.0 新增：语音指令控制 + 连续对话模式 + 智能节奏控制
 package com.gameai.ai
 
 import android.content.Context
@@ -63,6 +64,14 @@ object VoiceConversationEngine {
     // 分句 TTS：记录已经发送过 TTS 的句子数，避免重复播报
     private var spokenSentenceCount = 0
 
+    // ==== v3.0: 连续对话 + 指令控制 ====
+    // 连续对话模式：AI 回复完成后自动开始聆听（默认 true）
+    private var continuousConversation = true
+    // 聆听暂停（用户说"暂停"后临时停止自动聆听）
+    private var isListeningPaused = false
+    // 当前正在处理的命令（防重复处理）
+    private var currentCommand: VoiceCommandHandler.ParsedCommand? = null
+
     // 最新屏幕截图
     @Volatile var latestBitmap: Bitmap? = null
 
@@ -94,7 +103,19 @@ object VoiceConversationEngine {
         appContext = context.applicationContext
         VoiceService.onSpeakDone = {
             if (isActive && state == State.SPEAKING) {
-                startListening()
+                // v3.0: 连续对话模式 — TTS 说完自动开始下一轮聆听
+                if (continuousConversation && !isListeningPaused) {
+                    transitionState(State.IDLE)
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (isActive && !isListeningPaused) startListening()
+                    }, 300)  // 300ms 停顿，自然过渡
+                } else if (isListeningPaused) {
+                    // 暂停聆听时，停留在 IDLE 不自动重启
+                    transitionState(State.IDLE)
+                    broadcastMessage("system", "聆听已暂停，说\"继续听\"恢复")
+                } else {
+                    startListening()
+                }
             }
         }
         VoiceService.init(context)
@@ -131,17 +152,42 @@ object VoiceConversationEngine {
         isActive = true
         spokenSentenceCount = 0
         isBargingIn = false
+        continuousConversation = true
+        isListeningPaused = false
+        currentCommand = null
         transitionState(State.IDLE)
+
+        // 初始化指令处理器上下文
+        VoiceCommandHandler.setConversationActive(true)
+
+        // 初始化记忆系统
+        MemoryManager.init(ctx)
+        MemoryManager.startNewSession()
+
+        // 初始化技能系统
+        SkillManager.init(ctx)
+        kotlinx.coroutines.GlobalScope.launch {
+            SkillManager.importBuiltinSkills()
+        }
+
+        // 设置当前游戏上下文（同步技能系统）
+        CloudAiClient.currentGameName = "王者荣耀"
+        CloudAiClient.currentHeroName = ""
+
         startListening()
     }
 
     fun stopConversation() {
         isActive = false
+        continuousConversation = false
+        isListeningPaused = false
         stopListening()
         cancelStreamingCall()
         VoiceService.stopSpeaking()
         VoiceService.clearSpeakQueue()
         spokenSentenceCount = 0
+        currentCommand = null
+        VoiceCommandHandler.setConversationActive(false)
         transitionState(State.IDLE)
         cancelIdleTimer()
     }
@@ -190,21 +236,34 @@ object VoiceConversationEngine {
 
         transitionState(State.LISTENING)
 
-        // STT 成功 → 交给 AI 处理
+        // STT 成功 → 先检查语音指令，再交给 AI 处理
         val sttOnResult: (String) -> Unit = { text ->
             onUserSpeech?.invoke(text)
             broadcastMessage("user", text)
             onMessageReceived?.invoke(ChatMessage("user", text))
             VoiceService.stopListening()
 
-            // 如果检测到打断，清掉之前的流式 AI 消息广播
-            if (isBargingIn) {
-                broadcastStreamingEnd()
-                isBargingIn = false
-            }
+            // v3.0: 尝试解析语音指令（优先级高于 AI 对话）
+            val cmd = VoiceCommandHandler.tryParseCommand(text)
+            if (cmd != null) {
+                handleVoiceCommand(cmd)
+                // 指令已处理，不再走 AI 对话流程
+            } else {
+                // 如果之前在暂停聆听状态，用户说任何话都自动恢复
+                if (isListeningPaused && !isCommandText(text)) {
+                    isListeningPaused = false
+                    broadcastMessage("system", "聆听已恢复")
+                }
 
-            transitionState(State.PROCESSING)
-            processUserInputStreaming(text)
+                // 如果检测到打断，清掉之前的流式 AI 消息广播
+                if (isBargingIn) {
+                    broadcastStreamingEnd()
+                    isBargingIn = false
+                }
+
+                transitionState(State.PROCESSING)
+                processUserInputStreaming(text)
+            }
         }
 
         val sttOnError: (String) -> Unit = { error ->
@@ -324,6 +383,10 @@ object VoiceConversationEngine {
                 android.util.Log.d(TAG, "SSE 流完成: ${fullText.take(50)}...")
                 currentStreamingCall = null
 
+                // 保存对话上下文到记忆系统
+                MemoryManager.saveContext("last_user_msg", text.take(200))
+                MemoryManager.saveContext("last_assistant_msg", fullText.take(200))
+
                 // 流结束 → 处理最终结果
                 if (isBargingIn) {
                     isBargingIn = false
@@ -369,6 +432,79 @@ object VoiceConversationEngine {
         transitionState(State.SPEAKING)
         val ctx = appContext ?: return
         VoiceService.speak(ctx, text)
+    }
+
+    // ============================================================
+    //  v3.0: 语音指令处理
+    // ============================================================
+
+    /**
+     * 处理识别到的语音指令：执行指令 → TTS 确认 → 恢复聆听
+     */
+    private fun handleVoiceCommand(cmd: VoiceCommandHandler.ParsedCommand) {
+        currentCommand = cmd
+        val ctx = appContext ?: return
+
+        when (cmd.type) {
+            VoiceCommandHandler.CommandType.END_CONVERSATION -> {
+                // 播报确认后停止对话
+                val ack = VoiceCommandHandler.executeCommand(cmd)
+                broadcastMessage("system", ack)
+                VoiceService.speak(ctx, VoiceCommandHandler.getCommandAck(cmd))
+                // 等待 TTS 完成后退出
+                Handler(Looper.getMainLooper()).postDelayed({
+                    stopConversation()
+                }, 1500)
+                return
+            }
+
+            VoiceCommandHandler.CommandType.PAUSE_LISTENING -> {
+                isListeningPaused = true
+                val ack = VoiceCommandHandler.executeCommand(cmd)
+                broadcastMessage("system", ack)
+                transitionState(State.IDLE)
+                VoiceService.speak(ctx, ack)
+                // 暂停后不自动恢复聆听（等用户说"继续"）
+                return
+            }
+
+            VoiceCommandHandler.CommandType.RESUME_LISTENING -> {
+                isListeningPaused = false
+                val ack = VoiceCommandHandler.executeCommand(cmd)
+                broadcastMessage("system", ack)
+                transitionState(State.IDLE)
+                VoiceService.speak(ctx, ack)
+                // TTS 完成后自动恢复聆听
+                return
+            }
+
+            VoiceCommandHandler.CommandType.HELP -> {
+                val helpText = VoiceCommandHandler.executeCommand(cmd)
+                broadcastMessage("system", helpText)
+                transitionState(State.IDLE)
+                VoiceService.speak(ctx, "我可以帮你：开始分析、结束对局、暂停听、查看评分、查看出装等，需要我做什么？")
+                // 说完后恢复聆听
+                return
+            }
+
+            // 其余指令：执行 + 简短确认 + 自动恢复聆听
+            else -> {
+                val ack = VoiceCommandHandler.getCommandAck(cmd)
+                broadcastMessage("system", ack + " — " + VoiceCommandHandler.executeCommand(cmd))
+                VoiceCommandHandler.broadcastCommand(ctx, cmd)
+                VoiceCommandHandler.executeCommand(cmd)
+                transitionState(State.IDLE)
+                // 简短确认后恢复聆听
+                VoiceService.speak(ctx, ack)
+                return
+            }
+        }
+    }
+
+    /** 判断一段文字是否是恢复聆听触发词（非指令但也该触发恢复） */
+    private fun isCommandText(text: String): Boolean {
+        val t = text.trim().lowercase()
+        return t.matches(Regex(".*(结束|停止|关闭|退出|暂停|别说了|安静|继续|恢复|帮助|开始分析|开始对局|切换英雄|查看|查询).*"))
     }
 
     // ============================================================

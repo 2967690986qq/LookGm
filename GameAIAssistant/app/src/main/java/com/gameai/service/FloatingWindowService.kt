@@ -32,6 +32,7 @@ import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.gameai.R
 import com.gameai.ai.ScreenAnalysisEngine
+import com.gameai.ai.VoiceCommandHandler
 import com.gameai.ai.VoiceConversationEngine
 import com.gameai.utils.PreferencesManager
 import org.json.JSONObject
@@ -364,6 +365,21 @@ class FloatingWindowService : Service() {
                     VoiceConversationEngine.ACTION_VOICE_SPEECH_END -> {
                         updateVoiceUI()
                     }
+                    // v3.0: 流式文字更新（打字效果）
+                    VoiceConversationEngine.ACTION_VOICE_STREAMING -> {
+                        val text = intent.getStringExtra(VoiceConversationEngine.EXTRA_TEXT) ?: ""
+                        val isStreaming = intent.getBooleanExtra(VoiceConversationEngine.EXTRA_STREAMING, false)
+                        if (isStreaming && text.isNotBlank()) {
+                            // 流式中：只显示最后 15 个字符
+                            updateBallVoiceText("ai_stream", text.takeLast(15))
+                        }
+                    }
+                    // v3.0: 语音指令广播
+                    VoiceCommandHandler.ACTION_VOICE_COMMAND -> {
+                        val cmdType = intent.getStringExtra(VoiceCommandHandler.EXTRA_COMMAND_TYPE) ?: ""
+                        val cmdParam = intent.getStringExtra(VoiceCommandHandler.EXTRA_COMMAND_PARAM) ?: ""
+                        updateBallVoiceText("command", "✅ $cmdType")
+                    }
                 }
             }
         }
@@ -376,6 +392,8 @@ class FloatingWindowService : Service() {
             addAction(VoiceConversationEngine.ACTION_VOICE_READY)
             addAction(VoiceConversationEngine.ACTION_VOICE_SPEECH_BEGIN)
             addAction(VoiceConversationEngine.ACTION_VOICE_SPEECH_END)
+            addAction(VoiceConversationEngine.ACTION_VOICE_STREAMING)
+            addAction(VoiceCommandHandler.ACTION_VOICE_COMMAND)
         }
         LocalBroadcastManager.getInstance(this).registerReceiver(scoreReceiver!!, filter)
     }

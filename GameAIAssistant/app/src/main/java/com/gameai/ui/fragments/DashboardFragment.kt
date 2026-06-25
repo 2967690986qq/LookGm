@@ -24,11 +24,14 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.gameai.R
+import com.gameai.ai.VoiceCommandHandler
 import com.gameai.ai.VoiceConversationEngine
+import com.gameai.ai.UsageTracker
 import com.gameai.databinding.FragmentDashboardBinding
 import com.gameai.model.ScoreResult
 import com.gameai.ui.widget.ScoreGaugeView
 import com.gameai.viewmodel.MainViewModel
+import kotlinx.coroutines.*
 
 class DashboardFragment : Fragment(R.layout.fragment_dashboard) {
 
@@ -163,12 +166,25 @@ class DashboardFragment : Fragment(R.layout.fragment_dashboard) {
                         val text = intent.getStringExtra(VoiceConversationEngine.EXTRA_TEXT) ?: ""
                         addVoiceMessageBubble(role, text)
                     }
+                    // v3.0: 流式文字更新（打字效果）
+                    VoiceConversationEngine.ACTION_VOICE_STREAMING -> {
+                        val text = intent.getStringExtra(VoiceConversationEngine.EXTRA_TEXT) ?: ""
+                        val isStreaming = intent.getBooleanExtra(VoiceConversationEngine.EXTRA_STREAMING, false)
+                        updateStreamingText(text, isStreaming)
+                    }
+                    // v3.0: 语音指令广播
+                    VoiceCommandHandler.ACTION_VOICE_COMMAND -> {
+                        val cmdType = intent.getStringExtra(VoiceCommandHandler.EXTRA_COMMAND_TYPE) ?: ""
+                        addVoiceMessageBubble("system", "✅ 已执行: $cmdType")
+                    }
                 }
             }
         }
         val voiceFilter = IntentFilter().apply {
             addAction(VoiceConversationEngine.ACTION_VOICE_STATE)
             addAction(VoiceConversationEngine.ACTION_VOICE_MESSAGE)
+            addAction(VoiceConversationEngine.ACTION_VOICE_STREAMING)
+            addAction(VoiceCommandHandler.ACTION_VOICE_COMMAND)
         }
         LocalBroadcastManager.getInstance(requireContext()).registerReceiver(voiceReceiver!!, voiceFilter)
     }
@@ -180,10 +196,10 @@ class DashboardFragment : Fragment(R.layout.fragment_dashboard) {
         isVoiceActive = active
 
         if (active) {
-            binding.btnVoiceToggle.text = "⏹ 结束"
+            binding.btnVoiceToggle.text = "\u23F9 结束"
             binding.btnVoiceToggle.setBackgroundColor(resources.getColor(R.color.status_error, null))
         } else {
-            binding.btnVoiceToggle.text = "🎤 对话"
+            binding.btnVoiceToggle.text = "\uD83C\uDFA4 对话"
             binding.btnVoiceToggle.background = resources.getDrawable(R.drawable.bg_btn_primary, null)
             binding.btnVoiceToggle.setTextColor(resources.getColor(R.color.bg_primary, null))
         }
@@ -199,10 +215,10 @@ class DashboardFragment : Fragment(R.layout.fragment_dashboard) {
         // 状态文字
         val state = VoiceConversationEngine.state
         binding.tvVoiceDashboardState.text = when (state) {
-            VoiceConversationEngine.State.IDLE -> "🎤 点击麦克风开始对话"
-            VoiceConversationEngine.State.LISTENING -> "🎤 正在聆听，请说话..."
-            VoiceConversationEngine.State.PROCESSING -> "🤔 AI 正在分析屏幕..."
-            VoiceConversationEngine.State.SPEAKING -> "🔊 AI 正在回复..."
+            VoiceConversationEngine.State.IDLE -> "\uD83C\uDFA4 点击麦克风开始对话"
+            VoiceConversationEngine.State.LISTENING -> "\uD83C\uDFA4 正在聆听，请说话..."
+            VoiceConversationEngine.State.PROCESSING -> "\uD83E\uDD14 AI 正在分析屏幕..."
+            VoiceConversationEngine.State.SPEAKING -> "\uD83D\uDD0A AI 正在回复..."
         }
     }
 
@@ -235,6 +251,39 @@ class DashboardFragment : Fragment(R.layout.fragment_dashboard) {
 
         if (container.childCount > 20) {
             container.removeViewAt(0)
+        }
+    }
+
+    /** v3.0: 实时更新流式 AI 回复文字（打字效果） */
+    private var streamingBubble: TextView? = null
+
+    private fun updateStreamingText(text: String, isStreaming: Boolean) {
+        if (!isStreaming || text.isEmpty()) {
+            // 流式结束，重置气泡引用
+            streamingBubble = null
+            return
+        }
+
+        val container = binding.layoutVoiceMessages
+        val ctx = context ?: return
+
+        if (streamingBubble == null) {
+            // 创建新的流式气泡
+            streamingBubble = TextView(ctx).apply {
+                textSize = 13f
+                setTextColor(resources.getColor(R.color.accent_primary, null))
+                setBackgroundColor(resources.getColor(R.color.accent_bg, null))
+                setPadding(16, 10, 16, 10)
+                isSingleLine = false
+                maxLines = 5
+            }
+            container.addView(streamingBubble)
+        }
+
+        streamingBubble?.text = "AI: $text（输入中...）"
+
+        binding.scrollVoiceDashboard.post {
+            binding.scrollVoiceDashboard.fullScroll(View.FOCUS_DOWN)
         }
     }
 

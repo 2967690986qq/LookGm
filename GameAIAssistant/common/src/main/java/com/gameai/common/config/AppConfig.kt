@@ -38,5 +38,5 @@ object AppConfig {
 
     // 数据库
     const val DB_NAME = "game_ai.db"
-    const val DB_VERSION = 1
+    const val DB_VERSION = 2
 }

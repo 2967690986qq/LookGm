@@ -4,6 +4,9 @@ package com.gameai
 import android.app.Application
 import android.content.Intent
 import android.util.Log
+import com.gameai.ai.MemoryManager
+import com.gameai.ai.SkillManager
+import com.gameai.ai.UsageTracker
 import com.gameai.service.VoiceService
 import com.gameai.ui.MainActivity
 import com.gameai.utils.PreferencesManager
@@ -25,6 +28,11 @@ class GameAIApplication : Application() {
 
         // 预初始化语音引擎
         VoiceService.init(this)
+
+        // ===== Phase 1-3: OpenClaw 风格系统初始化 =====
+        SkillManager.init(this)
+        UsageTracker.init(this)
+        MemoryManager.init(this)
 
         // ===== 自动版本检测（每6小时检测一次）=====
         UpdateManager.checkOnStartup(this)
