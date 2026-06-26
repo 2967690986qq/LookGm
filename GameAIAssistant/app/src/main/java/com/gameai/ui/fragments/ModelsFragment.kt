@@ -1,15 +1,24 @@
 package com.gameai.ui.fragments
 
 import android.animation.ObjectAnimator
+import android.app.Dialog
+import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.*
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.gameai.R
@@ -23,8 +32,14 @@ import com.gameai.utils.PreferencesManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.TimeUnit
 
 class ModelsFragment : Fragment(R.layout.fragment_models) {
 
@@ -51,6 +66,15 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     private var carouselRunnable: Runnable? = null
     private var resumeCarouselRunnable: Runnable? = null
     private var currentCarouselIdx = 0
+
+    // ASR 测试相关
+    private var asrTestDialog: Dialog? = null
+    private val audioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) showAsrTestDialog()
+        else Toast.makeText(requireContext(), "需要麦克风权限才能测试语音转文字", Toast.LENGTH_LONG).show()
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
@@ -159,7 +183,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
             val bgRes = if (current || configured) R.drawable.bg_chip_selected else R.drawable.bg_chip_normal
             val textColor = when {
                 current -> resources.getColor(R.color.bg_secondary, null)
-                configured -> resources.getColor(R.color.accent_primary, null)
+                configured -> resources.getColor(R.color.bg_secondary, null)  // 深色文字在青色背景上可读
                 else -> resources.getColor(R.color.text_secondary, null)
             }
             chip.setTextColor(textColor); chip.background = resources.getDrawable(bgRes, null)
@@ -299,13 +323,17 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
             val tagTv = TextView(requireContext()).apply {
                 text = usedForLabel(model.usedFor)
                 textSize = 10f
-                setTextColor(resources.getColor(R.color.bg_primary, null))
                 background = resources.getDrawable(when (model.usedFor) {
                     "conversation" -> R.drawable.bg_chip_selected
                     "analysis" -> R.drawable.bg_chip_selected
                     "stt" -> R.drawable.bg_chip_selected
                     else -> R.drawable.bg_chip_normal
                 }, null)
+                setTextColor(resources.getColor(
+                    when (model.usedFor) {
+                        "conversation", "analysis", "stt" -> R.color.bg_secondary  // 深色字在青色底上
+                        else -> R.color.text_primary  // 亮色字在深色底上
+                    }, null))
                 setPadding(6, 2, 6, 2)
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -324,6 +352,16 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
                 setOnClickListener { showModelDialog(model, idx) }
             }
             card.addView(editBtn)
+
+            // ASR 测试按钮（仅对用途为 stt 的模型显示）
+            if (model.usedFor == "stt") {
+                val testBtn = TextView(requireContext()).apply {
+                    text = "\uD83C\uDFA4"; textSize = 16f; setPadding(6, 4, 10, 4)
+                    setTextColor(resources.getColor(R.color.accent_primary, null))
+                    setOnClickListener { openAsrTest() }
+                }
+                card.addView(testBtn)
+            }
 
             // 删除按钮
             val delBtn = TextView(requireContext()).apply {
@@ -537,46 +575,90 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         }
     }
 
+    /**
+     * 通过 OpenAI 兼容 API 获取模型列表。
+     * 自动拼接 {baseUrl}/models，使用 Bearer Token 鉴权。
+     */
     private fun fetchModelsFromApi(baseUrl: String, apiKey: String): List<String> {
-        val url = URL("$baseUrl/models")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.setRequestProperty("Authorization", "Bearer $apiKey")
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.connectTimeout = 8000
-        conn.readTimeout = 10000
-        return try {
-            val response = conn.inputStream.bufferedReader().readText()
-            conn.disconnect()
-            parseModelList(response)
-        } catch (e: Exception) {
-            conn.disconnect()
-            throw e
+        val fullUrl = "${baseUrl.trimEnd('/')}/models"
+        val client = OkHttpClient.Builder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+
+        val reqBuilder = Request.Builder().url(fullUrl).get()
+        if (apiKey.isNotEmpty()) {
+            reqBuilder.addHeader("Authorization", "Bearer $apiKey")
         }
+
+        val response = client.newCall(reqBuilder.build()).execute()
+        val body = response.body?.string() ?: ""
+        val code = response.code
+
+        if (!response.isSuccessful) {
+            val detail = try {
+                JSONObject(body).optString("error", JSONObject(body).optString("message", body.take(200)))
+            } catch (_: Exception) { body.take(200) }
+            throw RuntimeException(when (code) {
+                401 -> "API Key 无效或已过期"
+                403 -> "无权访问该接口"
+                404 -> "接口地址可能不正确：$fullUrl"
+                else -> "HTTP $code: $detail"
+            })
+        }
+
+        return parseModelList(body)
     }
 
+    /**
+     * 解析 OpenAI 兼容 /models 返回的 JSON。
+     * 标准格式：{"object":"list","data":[{"id":"model-name",...},...]}
+     * 兼容格式：{"models":[{"id":"model-name",...},...]}
+     * 也兼容直接数组格式：[{"id":"model-name",...},...]
+     */
     private fun parseModelList(json: String): List<String> {
         val models = mutableListOf<String>()
-        var idx = json.indexOf("\"data\"")
-        if (idx < 0) idx = json.indexOf("\"models\"")
-        if (idx < 0) return models
-        var remaining = json.substring(idx)
-        var safety = 0
-        while (safety < 500) {
-            safety++
-            val idIdx = remaining.indexOf("\"id\"") ?: break
-            if (idIdx < 0) break
-            val colonIdx = remaining.indexOf(':', idIdx) ?: break
-            if (colonIdx < 0) break
-            val startQuote = remaining.indexOf('"', colonIdx + 1) ?: break
-            if (startQuote < 0) break
-            val endQuote = remaining.indexOf('"', startQuote + 1) ?: break
-            if (endQuote < 0) break
-            val modelName = remaining.substring(startQuote + 1, endQuote)
-            if (modelName.isNotEmpty() && modelName.length > 1 && !modelName.contains(":")) {
-                models.add(modelName)
+        try {
+            val root = JSONObject(json)
+            // 标准 OpenAI 格式："data" 数组
+            var arr = root.optJSONArray("data")
+            // 某些供应商用 "models" 键
+            if (arr == null || arr.length() == 0) {
+                arr = root.optJSONArray("models")
             }
-            remaining = remaining.substring(endQuote + 1)
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    val id = item.optString("id", "")
+                    if (id.isNotEmpty()) models.add(id)
+                }
+            }
+        } catch (_: Exception) {
+            // 如果不是 JSONObject，尝试解析为 JSONArray
+            try {
+                val arr = org.json.JSONArray(json)
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    val id = item.optString("id", "")
+                    if (id.isNotEmpty()) models.add(id)
+                }
+            } catch (_: Exception) {
+                // 回退：搜索所有带 "id" 的字符串值（兼容非标准格式）
+                var idx = json.indexOf("\"id\"")
+                var safety = 0
+                while (idx >= 0 && safety < 500) {
+                    safety++
+                    val colonIdx = json.indexOf(':', idx)
+                    if (colonIdx < 0) break
+                    val startQ = json.indexOf('"', colonIdx + 1)
+                    if (startQ < 0) break
+                    val endQ = json.indexOf('"', startQ + 1)
+                    if (endQ < 0) break
+                    val name = json.substring(startQ + 1, endQ)
+                    if (name.isNotEmpty() && name !in models) models.add(name)
+                    idx = json.indexOf("\"id\"", endQ + 1)
+                }
+            }
         }
         return models
     }
@@ -736,10 +818,324 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     }
 
     private fun usedForLabel(usedFor: String): String = when (usedFor) {
-        "conversation" -> "语音对话"
-        "analysis" -> "画面分析"
-        "stt" -> "语音转文字"
-        else -> "通用"
+        "conversation" -> "\u8bed\u97f3\u5bf9\u8bdd"
+        "analysis" -> "\u753b\u9762\u5206\u6790"
+        "stt" -> "\u8bed\u97f3\u8f6c\u6587\u5b57"
+        else -> "\u901a\u7528"
+    }
+
+    // ===== ASR \u8bed\u97f3\u8f6c\u6587\u5b57\u6d4b\u8bd5 =====
+
+    private fun openAsrTest() {
+        if (ContextCompat.checkSelfPermission(requireContext(), android.Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            audioPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+        } else {
+            showAsrTestDialog()
+        }
+    }
+
+    /**
+     * \u663e\u793a ASR \u8bed\u97f3\u8f6c\u6587\u5b57\u6d4b\u8bd5\u6d6e\u52a8\u5bf9\u8bdd\u6846\u3002
+     *
+     * \u3010\u6279\u91cf\u6587\u4ef6\u6a21\u5f0f\u3011
+     *   - \u957f\u6309\u5f55\u97f3 \u2192 \u6301\u7eed\u5f55\u5236 16kHz/mono/16bit PCM
+     *   - \u677e\u624b \u2192 \u5b8c\u6574 PCM \u8f6c WAV \u2192 \u5355\u6b21 HTTP POST SiliconFlow
+     *   - \u6a21\u578b\uff1aFunAudioLLM/SenseVoiceSmall\uff08\u6c38\u4e45\u514d\u8d39\uff09
+     *   - \u4e0d\u652f\u6301\u5b9e\u65f6\u8fb9\u5f55\u8fb9\u51fa\u5b57\uff1a\u4ec5\u5f55\u97f3\u7ed3\u675f\u540e\u4e00\u6b21\u6027\u8bc6\u522b
+     *
+     * \u3010\u539f TeleAI/TeleSpeechASR \u62a5\u9519\u539f\u56e0\u3011
+     *   \u8be5\u6a21\u578b\u4ec5\u652f\u6301\u6279\u91cf\u6587\u4ef6\u4e0a\u4f20\uff0c\u4e0d\u652f\u6301 WebSocket \u6d41\u5f0f\u63a8\u6d41\u3002
+     *   \u4e4b\u524d\u5c1d\u8bd5\u7528 HTTP \u77ed\u5206\u7247\u6a21\u62df\u6d41\u5f0f\u5bfc\u81f4\u5206\u7247\u95f4\u4e22\u5b57/\u65ad\u53e5\u4e0d\u5b8c\u6574\u3002
+     *   \u73b0\u6539\u7528\u5b8c\u6574\u6587\u4ef6\u4e0a\u4f20\u65b9\u6848\uff0c\u4e00\u6b21\u5f55\u97f3\u4e00\u6b21\u4e0a\u4f20\u3002
+     */
+    private fun showAsrTestDialog() {
+        dismissAsrTestDialog()
+
+        val dialogView = LayoutInflater.from(requireContext())
+            .inflate(R.layout.dialog_asr_test, null)
+
+        val btnClose = dialogView.findViewById<TextView>(R.id.btn_close)
+        val btnRecord = dialogView.findViewById<TextView>(R.id.btn_record)
+        val btnClear = dialogView.findViewById<TextView>(R.id.btn_clear)
+        val btnRetry = dialogView.findViewById<TextView>(R.id.btn_retry)
+        val tvResult = dialogView.findViewById<TextView>(R.id.tv_result)
+        val tvStatus = dialogView.findViewById<TextView>(R.id.tv_status)
+        val pbLoading = dialogView.findViewById<ProgressBar>(R.id.pb_loading)
+        val dotStatus = dialogView.findViewById<View>(R.id.dot_status)
+        val tvHint = dialogView.findViewById<TextView>(R.id.tv_hint)
+
+        // \u5f55\u97f3\u76f8\u5173\u72b6\u6001
+        var audioRecord: AudioRecord? = null
+        var isRecording = false
+        var recordingThread: Thread? = null
+        val accumulatedAudio = ByteArrayOutputStream()
+
+        fun updateStatus(text: String, state: String) {
+            tvStatus.text = text
+            dotStatus.setBackgroundColor(
+                when (state) {
+                    "ready" -> ContextCompat.getColor(requireContext(), R.color.text_hint)
+                    "recording" -> ContextCompat.getColor(requireContext(), R.color.status_success)
+                    "loading" -> ContextCompat.getColor(requireContext(), R.color.accent_primary)
+                    "error" -> ContextCompat.getColor(requireContext(), R.color.status_error)
+                    else -> ContextCompat.getColor(requireContext(), R.color.text_hint)
+                }
+            )
+        }
+
+        fun stopAudioRecord() {
+            if (!isRecording) return
+            isRecording = false
+            recordingThread?.interrupt()
+            recordingThread = null
+            try { audioRecord?.stop() } catch (_: Exception) {}
+            try { audioRecord?.release() } catch (_: Exception) {}
+            audioRecord = null
+        }
+
+        fun pcmToWav(pcmData: ByteArray): ByteArray {
+            val sampleRate = 16000
+            val totalDataLen = pcmData.size + 36
+            val byteRate = sampleRate * 2
+            return ByteArrayOutputStream(pcmData.size + 44).apply {
+                val buf = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                buf.put("RIFF".toByteArray()); buf.putInt(totalDataLen)
+                buf.put("WAVE".toByteArray()); buf.put("fmt ".toByteArray())
+                buf.putInt(16); buf.putShort(1); buf.putShort(1)
+                buf.putInt(sampleRate); buf.putInt(byteRate)
+                buf.putShort(2); buf.putShort(16)
+                buf.put("data".toByteArray()); buf.putInt(pcmData.size)
+                write(buf.array()); write(pcmData)
+            }.toByteArray()
+        }
+
+        /** 获取 STT 专用 API Key — 优先从跨供应商 STT 配置获取，而非当前查看的供应商 */
+        fun getSttApiKey(): String {
+            // 优先：跨所有供应商搜索 STT 绑定的模型
+            val sttCfg = prefs.getSttModelConfig()
+            if (sttCfg != null && sttCfg.apiKey.isNotBlank()) return sttCfg.apiKey
+            // 兜底：当前查看的供应商（用户可能就在看 STT 供应商）
+            val savedCfg = providerConfigs[currentProvider.name]
+            if (!savedCfg?.apiKey.isNullOrBlank()) return savedCfg!!.apiKey
+            return ""
+        }
+
+        /**
+         * \u4e0a\u4f20\u5b8c\u6574 WAV \u97f3\u9891\u5230 SiliconFlow\u3002
+         * \u5355\u6b21 HTTP POST \u4e0a\u4f20\uff0c\u5b8c\u6574\u8bc6\u522b\u3002
+         */
+        fun setError(msg: String) {
+            pbLoading.visibility = View.GONE
+            btnRecord.text = "\u6309\u4f4f\u5f55\u97f3"
+            btnRecord.isEnabled = true
+            when {
+                msg.contains("401") -> tvResult.text = "\u274c API Key \u65e0\u6548\u6216\u8fc7\u671f\n\u8bf7\u5728\u6a21\u578b\u914d\u7f6e\u4e2d\u66f4\u65b0 SiliconFlow API Key"
+                msg.contains("timeout") || msg.contains("\u7f51\u7edc") -> tvResult.text = "\u274c \u7f51\u7edc\u8fde\u63a5\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5"
+                msg.contains("\u683c\u5f0f") -> tvResult.text = "\u274c $msg"
+                else -> tvResult.text = "\u274c \u8bc6\u522b\u5931\u8d25: $msg"
+            }
+            tvResult.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_error))
+            updateStatus("\u8bc6\u522b\u5931\u8d25", "error")
+            tvHint.text = "\u957f\u6309\u6309\u94ae\u91cd\u65b0\u5f55\u97f3"
+            btnRetry.visibility = View.VISIBLE
+        }
+
+        fun setSuccess(text: String) {
+            pbLoading.visibility = View.GONE
+            btnRecord.text = "\u6309\u4f4f\u5f55\u97f3"
+            btnRecord.isEnabled = true
+            if (text.isNotBlank()) {
+                tvResult.text = text.trim()
+                tvResult.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_primary))
+                updateStatus("\u2713 \u8bc6\u522b\u5b8c\u6210", "ready")
+                tvHint.text = "\u6a21\u578b: FunAudioLLM/SenseVoiceSmall\uff08\u6c38\u4e45\u514d\u8d39\uff09| \u6279\u91cf\u6587\u4ef6\u8f6c\u5199"
+                btnRetry.visibility = View.GONE
+            } else {
+                tvResult.text = "\u26a0\ufe0f \u672a\u8bc6\u522b\u5230\u8bed\u97f3\u5185\u5bb9\uff0c\u8bf7\u5927\u58f0\u6e05\u6670\u5730\u8bf4\u4e00\u53e5\u8bdd"
+                tvResult.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_warning))
+                updateStatus("\u5b8c\u6210 \u2014 \u65e0\u5185\u5bb9", "ready")
+                tvHint.text = "\u5f55\u97f3\u540e\u4e00\u6b21\u6027\u4e0a\u4f20\u8bc6\u522b\uff0c\u975e\u5b9e\u65f6\u8fb9\u5f55\u8fb9\u51fa\u5b57"
+                btnRetry.visibility = View.VISIBLE
+            }
+        }
+
+        fun uploadAudio(wavData: ByteArray) {
+            pbLoading.visibility = View.VISIBLE
+            btnRecord.isEnabled = false
+            btnRecord.text = "\u8bc6\u522b\u4e2d..."
+            updateStatus("\u6b63\u5728\u8bc6\u522b...", "loading")
+
+            lifecycleScope.launch {
+                try {
+                    val apiKey = getSttApiKey()
+                    if (apiKey.isBlank()) {
+                        withContext(Dispatchers.Main) {
+                            setError("\u672a\u914d\u7f6e API Key\uff0c\u8bf7\u5728\u6a21\u578b\u914d\u7f6e\u4e2d\u7ed1\u5b9a")
+                        }
+                        return@launch
+                    }
+
+                    val text = withContext(Dispatchers.IO) {
+                        val mediaType = "audio/wav".toMediaType()
+                        // SiliconFlow /v1/audio/transcriptions 仅接受 file + model 两个参数
+                        val requestBody = MultipartBody.Builder()
+                            .setType(MultipartBody.FORM)
+                            .addFormDataPart("file", "recording.wav", wavData.toRequestBody(mediaType))
+                            .addFormDataPart("model", "FunAudioLLM/SenseVoiceSmall")
+                            .build()
+
+                        val request = Request.Builder()
+                            .url("https://api.siliconflow.cn/v1/audio/transcriptions")
+                            .post(requestBody)
+                            .addHeader("Authorization", "Bearer $apiKey")
+                            .addHeader("Accept", "application/json")
+                            .build()
+
+                        val response = OkHttpClient.Builder()
+                            .connectTimeout(15, TimeUnit.SECONDS)
+                            .readTimeout(60, TimeUnit.SECONDS)
+                            .writeTimeout(30, TimeUnit.SECONDS)
+                            .build()
+                            .newCall(request).execute()
+
+                        if (response.isSuccessful) {
+                            val body = response.body?.string() ?: ""
+                            val result = JSONObject(body).optString("text", "")
+                            response.close()
+                            result
+                        } else {
+                            val code = response.code
+                            val errBody = response.body?.string() ?: ""
+                            response.close()
+                            val detail = try { JSONObject(errBody).optString("message", errBody.take(100)) } catch (_: Exception) { errBody.take(100) }
+                            val msg = when (code) {
+                                400 -> if (detail.contains("file", ignoreCase = true)) "\u97f3\u9891\u683c\u5f0f\u9519\u8bef\uff1a\u9700 16kHz \u5355\u58f0\u9053 WAV" else "\u53c2\u6570\u9519\u8bef: $detail"
+                                401 -> "API Key \u65e0\u6548\u6216\u5df2\u8fc7\u671f (401)"
+                                403 -> "\u65e0\u6743\u8bbf\u95ee (403)"
+                                404 -> "\u6a21\u578b FunAudioLLM/SenseVoiceSmall \u4e0d\u5b58\u5728 (404)"
+                                429 -> "\u8bf7\u6c42\u9891\u7387\u8fc7\u9ad8 (429)"
+                                in 500..599 -> "\u670d\u52a1\u5668\u9519\u8bef ($code)"
+                                else -> "HTTP $code: $detail"
+                            }
+                            throw RuntimeException("\u274c $msg")
+                        }
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        setSuccess(text)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("ASR_TEST", "\u4e0a\u4f20\u5931\u8d25", e)
+                    withContext(Dispatchers.Main) {
+                        setError(e.message ?: "\u672a\u77e5\u9519\u8bef")
+                    }
+                }
+            }
+        }
+
+        // \u957f\u6309\u5f55\u97f3 \u2192 \u677e\u624b\u4e0a\u4f20\u8bc6\u522b
+        btnRecord.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    isRecording = true
+                    accumulatedAudio.reset()
+                    btnRecord.text = "\u5f55\u97f3\u4e2d..."
+                    btnRecord.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.status_error))
+                    updateStatus("\uD83C\uDF99 \u6b63\u5728\u5f55\u97f3...", "recording")
+                    tvHint.text = "\u677e\u624b\u540e\u81ea\u52a8\u4e0a\u4f20\u8bc6\u522b\uff08\u6279\u91cf\u6a21\u5f0f\uff0c\u975e\u5b9e\u65f6\uff09"
+                    tvResult.text = "\u5f55\u97f3\u4e2d\uff0c\u677e\u624b\u540e\u81ea\u52a8\u8bc6\u522b..."
+                    tvResult.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_hint))
+                    btnRetry.visibility = View.GONE
+
+                    try {
+                        val bufSize = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(4096)
+                        audioRecord = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, 16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize)
+                        audioRecord?.startRecording()
+                        recordingThread = Thread {
+                            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                            val buffer = ByteArray(bufSize)
+                            while (isRecording) {
+                                val read = audioRecord?.read(buffer, 0, bufSize) ?: -1
+                                if (read > 0) synchronized(accumulatedAudio) { accumulatedAudio.write(buffer, 0, read) }
+                            }
+                        }.apply { start() }
+                    } catch (e: SecurityException) {
+                        updateStatus("\u7f3a\u5c11\u5f55\u97f3\u6743\u9650", "error")
+                        tvResult.text = "\u274c \u7f3a\u5c11\u5f55\u97f3\u6743\u9650"
+                        tvResult.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_error))
+                        isRecording = false
+                    }
+                    true
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (!isRecording) {
+                        btnRecord.text = "\u6309\u4f4f\u5f55\u97f3"
+                        btnRecord.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.accent_primary))
+                        return@setOnTouchListener true
+                    }
+                    stopAudioRecord()
+
+                    val audioData: ByteArray
+                    synchronized(accumulatedAudio) { audioData = accumulatedAudio.toByteArray() }
+
+                    if (audioData.size < 16000 / 2) {
+                        btnRecord.text = "\u6309\u4f4f\u5f55\u97f3"
+                        btnRecord.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.accent_primary))
+                        tvResult.text = "\u26a0\ufe0f \u5f55\u97f3\u592a\u77ed (${audioData.size / 32}ms)\uff0c\u8bf7\u81f3\u5c11\u8bf4 0.5 \u79d2"
+                        tvResult.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_warning))
+                        updateStatus("\u5f55\u97f3\u592a\u77ed", "ready")
+                        tvHint.text = "\u5f55\u97f3\u540e\u4e00\u6b21\u6027\u4e0a\u4f20\u8bc6\u522b"
+                        return@setOnTouchListener true
+                    }
+
+                    val wavData = pcmToWav(audioData)
+                    uploadAudio(wavData)
+                    true
+                }
+
+                else -> false
+            }
+        }
+
+        btnClear.setOnClickListener {
+            tvResult.text = "\u8bc6\u522b\u7ed3\u679c\u5c06\u5728\u8fd9\u91cc\u663e\u793a..."
+            tvResult.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_hint))
+            updateStatus("\u5df2\u6e05\u7a7a \u2014 \u957f\u6309\u6309\u94ae\u5f00\u59cb\u5f55\u97f3", "ready")
+            tvHint.text = "\u6a21\u578b: FunAudioLLM/SenseVoiceSmall\uff08\u6c38\u4e45\u514d\u8d39\uff09| \u6279\u91cf\u6587\u4ef6\u8f6c\u5199"
+            btnRetry.visibility = View.GONE
+        }
+
+        btnRetry.setOnClickListener {
+            tvResult.text = "\u8bc6\u522b\u7ed3\u679c\u5c06\u5728\u8fd9\u91cc\u663e\u793a..."
+            tvResult.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_hint))
+            updateStatus("\u5c31\u7eea \u2014 \u957f\u6309\u6309\u94ae\u5f00\u59cb\u5f55\u97f3", "ready")
+            btnRetry.visibility = View.GONE
+        }
+
+        btnClose.setOnClickListener { dismissAsrTestDialog() }
+        dialogView.setOnClickListener { /* no-op */ }
+        dialogView.findViewById<View>(R.id.card_root)?.setOnClickListener { /* no-op */ }
+
+        val dialog = Dialog(requireContext(), android.R.style.Theme_Translucent_NoTitleBar).apply {
+            setContentView(dialogView)
+            setCancelable(true)
+            setOnCancelListener { stopAudioRecord(); dismissAsrTestDialog() }
+            window?.apply {
+                setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                setBackgroundDrawableResource(android.R.color.transparent)
+                addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+            }
+        }
+
+        asrTestDialog = dialog
+        dialog.show()
+    }
+
+    private fun dismissAsrTestDialog() {
+        asrTestDialog?.dismiss()
+        asrTestDialog = null
     }
 
     override fun onDestroyView() {

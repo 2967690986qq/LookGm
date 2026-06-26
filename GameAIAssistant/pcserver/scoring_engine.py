@@ -103,14 +103,14 @@ class LocalScoringEngine:
             "voice_text": voice_text,
             "detail": f"KDA:{kills}/{deaths}/{assists} | 评分:{total}",
             "categories": {
-                "kda": {"score": kda_score, "max": 25, "name": "KDA"},
-                "economy": {"score": economy_score, "max": 20, "name": "经济"},
-                "teamfight": {"score": teamfight_score, "max": 15, "name": "参团率"},
-                "vision": {"score": vision_score, "max": 15, "name": "视野"},
-                "damage": {"score": damage_score, "max": 10, "name": "输出"},
-                "survival": {"score": survival_score, "max": 5, "name": "生存"},
-                "develop": {"score": develop_score, "max": 5, "name": "发育"},
-                "tempo": {"score": tempo_score, "max": 5, "name": "节奏"}
+                "kda": {"name": "KDA", "score": kda_score, "maxScore": 25, "rating": self._grade_for_category(kda_score, 25), "detail": ""},
+                "economy": {"name": "经济", "score": economy_score, "maxScore": 20, "rating": self._grade_for_category(economy_score, 20), "detail": ""},
+                "teamfight": {"name": "参团率", "score": teamfight_score, "maxScore": 15, "rating": self._grade_for_category(teamfight_score, 15), "detail": ""},
+                "vision": {"name": "视野", "score": vision_score, "maxScore": 15, "rating": self._grade_for_category(vision_score, 15), "detail": ""},
+                "damage": {"name": "输出", "score": damage_score, "maxScore": 10, "rating": self._grade_for_category(damage_score, 10), "detail": ""},
+                "survival": {"name": "生存", "score": survival_score, "maxScore": 5, "rating": self._grade_for_category(survival_score, 5), "detail": ""},
+                "develop": {"name": "发育", "score": develop_score, "maxScore": 5, "rating": self._grade_for_category(develop_score, 5), "detail": ""},
+                "tempo": {"name": "节奏", "score": tempo_score, "maxScore": 5, "rating": self._grade_for_category(tempo_score, 5), "detail": ""}
             }
         }
 
@@ -129,8 +129,17 @@ class LocalScoringEngine:
 
     @staticmethod
     def _compute_grade(score: int) -> str:
-        if score >= 97: return "顶级"
-        elif score >= 90: return "金牌"
-        elif score >= 75: return "银牌"
-        elif score >= 60: return "铜牌"
-        else: return "无评级"
+        if score >= 90: return "S"
+        elif score >= 80: return "A"
+        elif score >= 65: return "B"
+        elif score >= 50: return "C"
+        else: return "D"
+
+    @staticmethod
+    def _grade_for_category(score: int, max_score: int) -> str:
+        ratio = score / max(max_score, 1)
+        if ratio >= 0.9: return "S"
+        elif ratio >= 0.8: return "A"
+        elif ratio >= 0.65: return "B"
+        elif ratio >= 0.5: return "C"
+        else: return "D"

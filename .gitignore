@@ -15,6 +15,9 @@ app/build/
 *.dex
 *.class
 
+# Generated artifacts
+outputs/
+
 # Gradle
 .gradle/
 !gradle/wrapper/gradle-wrapper.jar

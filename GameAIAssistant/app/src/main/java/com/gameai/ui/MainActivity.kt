@@ -17,6 +17,7 @@ import com.gameai.common.constants.GameConstants
 import com.gameai.databinding.ActivityMainBinding
 import com.gameai.engine.GameStateManager
 import com.gameai.service.FloatingWindowService
+import com.gameai.ui.fragments.ChatFragment
 import com.gameai.ui.fragments.DashboardFragment
 import com.gameai.ui.fragments.GameHistoryFragment
 import com.gameai.ui.fragments.ModelsFragment
@@ -30,6 +31,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: PreferencesManager
 
     private val dashboardFragment = DashboardFragment()
+    private val chatFragment = ChatFragment()
     private val modelsFragment = ModelsFragment()
     private val historyFragment = GameHistoryFragment()
     private val profileFragment = ProfileFragment()
@@ -59,10 +61,11 @@ class MainActivity : AppCompatActivity() {
         // ===== 悬浮窗权限检查与引导 =====
         checkFloatingBallOnStartup()
 
-        // 初始化四个Fragment
+        // 初始化五个Fragment
         supportFragmentManager.beginTransaction()
             .add(R.id.fragment_container, profileFragment, "profile").hide(profileFragment)
             .add(R.id.fragment_container, historyFragment, "history").hide(historyFragment)
+            .add(R.id.fragment_container, chatFragment, "chat").hide(chatFragment)
             .add(R.id.fragment_container, modelsFragment, "models").hide(modelsFragment)
             .add(R.id.fragment_container, dashboardFragment, "dashboard")
             .commit()
@@ -74,6 +77,7 @@ class MainActivity : AppCompatActivity() {
             when (item.itemId) {
                 R.id.nav_dashboard -> showFragment(dashboardFragment)
                 R.id.nav_models -> showFragment(modelsFragment)
+                R.id.nav_chat -> showFragment(chatFragment)
                 R.id.nav_history -> showFragment(historyFragment)
                 R.id.nav_profile -> showFragment(profileFragment)
             }

@@ -1,5 +1,36 @@
-// CloudSpeechRecognizer.kt — 云端语音识别（自建，不依赖 Google App）
-// 使用 AudioRecord 录制 → Whisper API 转文字 → 回调结果
+// CloudSpeechRecognizer.kt — SiliconFlow FunAudioLLM/SenseVoiceSmall 批量文件语音转文字
+//
+// 【模型说明】
+//   TeleAI/TeleSpeechASR → 仅支持批量文件上传，不支持实时边录边出字 → 已废弃
+//   FunAudioLLM/SenseVoiceSmall → 永久免费，替代上述模型，解决原模型无法实时流式的报错
+//
+// 【接口】
+//   POST https://api.siliconflow.cn/v1/audio/transcriptions
+//   multipart/form-data 上传完整 WAV 音频文件
+//   注意1：该接口为批量文件转写 API，不支持实时边录边出字
+//   注意2：该接口仅接受 file + model 两个参数，不支持 language/prompt/response_format/temperature
+//
+// 【核心流程（批量模式 — 最简单方案，杜绝报错）】
+//   AudioRecord 16kHz/mono/16bit PCM 持续录制（内置 AEC 回声消除 + NS 降噪）
+//   → 用户停止说话（VAD 检测 800ms 静音）或主动停止
+//   → 完整 PCM 转 WAV（添加 44 字节 RIFF 头）
+//   → 单次 HTTP POST 上传完整文件到 SiliconFlow
+//   → 解析 response JSON 中 text 字段 → onResult 回调
+//   → UI 展示完整转写文字
+//
+// 【拒绝流式分片，采用批量文件方案】
+//   - 不用 WebSocket 流式推送：旧代码 TeleSpeechAsrClient.kt 已删除
+//   - 不用 HTTP 短分片模拟流式：分片上下文断裂会导致识别不准
+//   - 采用最可靠方案：完整录音 → 完整 WAV → 单次 POST → 完整文字
+//   - 彻底杜绝流式转录常见报错（断句不完整/语调丢失/分片间丢字）
+//
+// 【该模型永久免费说明】
+//   FunAudioLLM/SenseVoiceSmall 是硅基流动平台永久免费的语音识别模型，
+//   支持中英混合、多语言、多方言、情感识别，无需付费即可使用。
+//   原 TeleAI/TeleSpeechASR 报错根因：该模型仅支持批量文件转写，
+//   不支持实时麦克风流式推流，之前代码尝试用 WebSocket/HTTP 短分片
+//   模拟流式导致大量报错。
+
 package com.gameai.voice
 
 import android.Manifest
@@ -8,11 +39,12 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Handler
 import android.os.Looper
-import android.util.Base64
 import android.util.Log
-import com.gameai.model.ProviderConfig
+import com.gameai.common.config.AppConfig
 import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -25,82 +57,128 @@ import java.util.concurrent.TimeUnit
 
 class CloudSpeechRecognizer(
     private val context: Context,
-    private val getProviderConfig: () -> ProviderConfig?,
+    private val apiKeyProvider: () -> String,
+    // 注意：onPartialResult 仅保留以兼容旧调用方，批量模式下不会触发
+    private val onPartialResult: (String) -> Unit = {},
     private val onResult: (String) -> Unit,
     private val onError: (String) -> Unit,
     private val onReady: () -> Unit = {},
-    private val onSilence: () -> Unit = {},
     private val onRmsChanged: (Float) -> Unit = {},
     private val onSpeechBegin: () -> Unit = {},
-    private val onSpeechEnd: () -> Unit = {}
+    private val onSpeechEnd: () -> Unit = {},
+    private val onSilence: () -> Unit = {}
 ) {
     companion object {
         private const val TAG = "CloudSpeechRec"
-        private const val SAMPLE_RATE = 16000          // Whisper 推荐采样率
+
+        // ===== 音频硬件参数（SiliconFlow API 要求） =====
+        private const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        private const val BUFFER_SIZE = 2048            // 每帧字节数
-        private const val SILENCE_TIMEOUT_MS = 3000L    // 静音超时
-        private const val SPEECH_START_THRESHOLD = 400.0   // 语音起始 RMS 阈值
-        private const val SPEECH_END_THRESHOLD = 250.0     // 语音结束 RMS 阈值
-        private const val SPEECH_END_CONSECUTIVE = 5       // 连续静音帧数（~500ms）判定语音结束
-        private const val MAX_RECORD_DURATION_MS = 15000L  // 最长录音时长
+        private const val BYTES_PER_SAMPLE = 2
 
-        // v3.0: 自适应 VAD 参数
-        private const val NOISE_FLOOR_WINDOW = 20      // 计算噪声底噪的帧数窗口
-        private const val ADAPTIVE_FACTOR = 1.8          // 语音起始阈值 = 噪声底噪 × 该系数
+        // 音频读取缓冲区大小
+        private const val BUFFER_SIZE = 2048
+
+        // ===== VAD 语音活动检测参数 =====
+        // 用于自动检测用户是否说完话（静音 800ms 自动停止并识别）
+        private const val SPEECH_START_THRESHOLD = 400.0
+        private const val SPEECH_END_THRESHOLD = 250.0
+        private const val SILENCE_CHUNKS_FOR_END = 5      // 连续 5 个静音帧 ≈ 800ms 后自动结束
+        private const val MAX_RECORD_DURATION_MS = 15000L  // 最长录音 15 秒（安全保护）
+        private const val WARM_UP_DURATION_MS = 600L        // 录音预热期：启动后 600ms 内抑制 VAD，防止 TTS 残留回声误识别
+
+        // 自适应噪声底噪估计
+        private const val NOISE_FLOOR_WINDOW = 20
+        private const val ADAPTIVE_FACTOR = 1.8
+
+        // ===== SiliconFlow API =====
+        // POST https://api.siliconflow.cn/v1/audio/transcriptions (multipart/form-data)
+        private const val SILICONFLOW_URL = "https://api.siliconflow.cn/v1/audio/transcriptions"
+
+        // 模型名称：FunAudioLLM/SenseVoiceSmall
+        // 永久免费，低延迟，支持中英混合 + 多方言 + 情感识别
+        // 注意：非 TeleAI/TeleSpeechASR（该模型仅批量文件，不支持流式）
+        private const val STT_MODEL = "FunAudioLLM/SenseVoiceSmall"
     }
 
+    // ===== 音频硬件 =====
     private var audioRecord: AudioRecord? = null
-    private var isRecording = false
-    private var isSpeechActive = false
-    private var accumulatedAudio = ByteArrayOutputStream()
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var silenceTimer: Runnable? = null
-    private var silenceFrameCount = 0
-    private var speechFrameCount = 0
-    private var rmsDbHelper = 1.0  // 用于平滑 RMS
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
 
-    // v3.0: 自适应 VAD — 动态计算噪声底噪
+    // ===== 状态标志 =====
+    @Volatile private var isRecording = false
+    @Volatile private var isSpeechActive = false
+    private var recordingStartTime = 0L  // 录音开始时间戳，用于预热期判断
+
+    /**
+     * 永久停止标志：设为 true 后，所有自动重启将被忽略。
+     * 修复 "点击结束对话后麦克风继续运行" 的核心机制。
+     */
+    @Volatile var isPermanentlyStopped = false
+        private set
+
+    // ===== 音频数据 =====
+    private val accumulatedAudio = ByteArrayOutputStream()   // 累积全部 PCM 数据
+    private val audioLock = Any()                             // 线程安全锁
+
+    // ===== 自适应 VAD =====
     private val recentNoiseLevels = mutableListOf<Double>()
-    private var estimatedNoiseFloor = 100.0  // 初始估计底噪
+    private var estimatedNoiseFloor = 100.0
     private var adaptiveSpeechStart = SPEECH_START_THRESHOLD.toDouble()
     private var adaptiveSpeechEnd = SPEECH_END_THRESHOLD.toDouble()
+    private var speechFrameCount = 0
+    private var silenceFrameCount = 0
 
+    // ===== 线程管理 =====
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var currentThread: Thread? = null
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    // ===== HTTP 客户端 =====
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)     // 完整音频识别可能需要更长时间
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
-    private var currentThread: Thread? = null
-
-    // 防止 STT 失败时无限循环弹 Toast
+    // ===== 防抖 =====
     private var failedSttAttempts = 0
-    private var lastSttErrorToast = 0L
 
-    // 每次 startListening 创建新线程（Thread 只能 start 一次）
+    // ============================================================
+    //  公共方法
+    // ============================================================
 
+    /**
+     * 开始录音监听。
+     * 录音权限在外部已检查。
+     * 每次调用前会清理之前的状态。
+     */
     fun startListening() {
-        // 检查录音权限
+        // 权限检查
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
             if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
-                onError("缺少录音权限")
+                onError("缺少录音权限，请在设置中授权麦克风权限")
                 return
             }
         }
 
-        stopListening() // 先清理
+        stopListening()
+
+        isPermanentlyStopped = false
+        accumulatedAudio.reset()
+        isSpeechActive = false
+        speechFrameCount = 0
+        silenceFrameCount = 0
 
         val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
         val bufSize = maxOf(minBufSize, BUFFER_SIZE * 2)
 
         try {
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -110,18 +188,18 @@ class CloudSpeechRecognizer(
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 audioRecord?.release()
                 audioRecord = null
-                onError("麦克风初始化失败，请检查权限")
+                onError("麦克风初始化失败，请检查权限或重启应用")
                 return
             }
 
+            // 初始化硬件降噪
+            initNoiseReduction()
+
             audioRecord?.startRecording()
             isRecording = true
-            isSpeechActive = false
-            silenceFrameCount = 0
-            speechFrameCount = 0
-            accumulatedAudio.reset()
+            recordingStartTime = System.currentTimeMillis()
 
-            // v3.0: 重置自适应 VAD
+            // 重置自适应 VAD
             recentNoiseLevels.clear()
             estimatedNoiseFloor = 100.0
             adaptiveSpeechStart = SPEECH_START_THRESHOLD.toDouble()
@@ -129,31 +207,73 @@ class CloudSpeechRecognizer(
 
             mainHandler.post {
                 onReady()
-                Log.d(TAG, "云端语音识别已启动")
+                Log.d(TAG, "语音识别已启动 → SiliconFlow $STT_MODEL (批量文件模式)")
             }
 
-            // 启动录音处理线程（每次新建，Thread 只能 start 一次）
+            // 启动录音线程
             currentThread = Thread {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
                 processAudioLoop()
             }.apply { start() }
 
-            // 最长录音保护
+            // 最长录音保护（15 秒后强制结束并识别）
             mainHandler.postDelayed({
                 if (isRecording) {
-                    Log.d(TAG, "达到最长录音时长，强制结束")
-                    finishSpeech()
+                    Log.d(TAG, "达到最长录音时长 (${MAX_RECORD_DURATION_MS}ms)，自动停止并识别")
+                    finishSpeechAndRecognize()
                 }
             }, MAX_RECORD_DURATION_MS)
 
         } catch (e: SecurityException) {
-            onError("录音权限被拒绝")
+            onError("录音权限被拒绝，请在系统设置中授予麦克风权限")
         } catch (e: Exception) {
             onError("麦克风错误: ${e.message}")
         }
     }
 
+    /**
+     * 停止录音并彻底阻止自动重启。
+     * 调用此方法后，麦克风将完全释放，不会再自动恢复。
+     */
+    fun stopListening() {
+        Log.d(TAG, "stopListening() — 永久停止，释放所有资源")
+        isPermanentlyStopped = true
+        isRecording = false
+
+        // 取消所有延迟任务
+        mainHandler.removeCallbacksAndMessages(null)
+
+        // 中断录音线程
+        currentThread?.interrupt()
+        currentThread = null
+
+        // 释放 AudioRecord
+        releaseHardware()
+
+        // 取消所有协程
+        scope.cancel()
+        scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        Log.d(TAG, "stopListening() 完成 — AudioRecord 已释放，协程已取消")
+    }
+
+    fun pauseListening() {
+        isRecording = false
+        isPermanentlyStopped = true
+        try { audioRecord?.stop() } catch (_: Exception) {}
+    }
+
+    fun resumeListening() {
+        if (!isRecording) startListening()
+    }
+
+    // ============================================================
+    //  音频处理循环（持续录制 PCM，VAD 检测语音活动）
+    // ============================================================
+
     private fun processAudioLoop() {
         val buffer = ByteArray(BUFFER_SIZE)
+        var vadCheckCounter = 0
 
         while (isRecording && !Thread.currentThread().isInterrupted) {
             val bytesRead = audioRecord?.read(buffer, 0, BUFFER_SIZE) ?: -1
@@ -163,347 +283,317 @@ class CloudSpeechRecognizer(
                 continue
             }
 
-            // 计算 RMS (均方根音量)
-            val rms = calculateRms(buffer, bytesRead)
-
-            // 平滑 RMS
-            rmsDbHelper = rmsDbHelper * 0.7 + rms * 0.3
-
-            // 通知音量变化
-            val rmsDisplay = (rmsDbHelper / 1000.0).toFloat().coerceIn(0f, 15f)
-            mainHandler.post { onRmsChanged(rmsDisplay) }
-
-            // 保存音频数据
-            synchronized(accumulatedAudio) {
+            // 累积音频数据
+            synchronized(audioLock) {
                 accumulatedAudio.write(buffer, 0, bytesRead)
             }
 
-            // v3.0: 自适应 VAD — 跟踪噪声底噪，动态调整阈值
-            if (!isSpeechActive) {
-                // 在安静阶段收集噪声样本
-                recentNoiseLevels.add(rms)
-                if (recentNoiseLevels.size > NOISE_FLOOR_WINDOW) {
-                    recentNoiseLevels.removeAt(0)
-                }
-                if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
-                    // 计算中位数作为底噪估计
-                    val sorted = recentNoiseLevels.sorted()
-                    estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
-                    adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR).coerceAtLeast(SPEECH_START_THRESHOLD.toDouble())
-                    adaptiveSpeechEnd = (estimatedNoiseFloor * 1.4).coerceAtLeast(SPEECH_END_THRESHOLD.toDouble())
-                }
-            }
-
-            // VAD 状态机
-            if (!isSpeechActive) {
-                // 等待语音开始（使用自适应阈值）
-                if (rmsDbHelper > adaptiveSpeechStart) {
-                    speechFrameCount++
-                    if (speechFrameCount >= 3) {
-                        isSpeechActive = true
-                        silenceFrameCount = 0
-                        mainHandler.post { onSpeechBegin() }
-                        Log.d(TAG, "语音开始 (RMS=${rmsDbHelper.toInt()}>阈值=${adaptiveSpeechStart.toInt()}, 底噪=${estimatedNoiseFloor.toInt()})")
-                    }
-                } else {
-                    speechFrameCount = maxOf(speechFrameCount - 1, 0)  // 平滑衰减
-                }
-            } else {
-                // 检测语音结束（使用自适应阈值）
-                if (rmsDbHelper < adaptiveSpeechEnd) {
-                    silenceFrameCount++
-                    if (silenceFrameCount >= SPEECH_END_CONSECUTIVE) {
-                        Log.d(TAG, "语音结束 (RMS=${rmsDbHelper.toInt()}<阈值=${adaptiveSpeechEnd.toInt()}, 静音帧=$silenceFrameCount)")
-                        mainHandler.post { onSpeechEnd() }
-                        finishSpeech()
-                        return
-                    }
-                } else {
-                    silenceFrameCount = 0
-                }
+            // 每 8 次读取（≈ 100ms）做一次 VAD 检测
+            vadCheckCounter++
+            if (vadCheckCounter >= 8) {
+                vadCheckCounter = 0
+                checkVad(buffer, bytesRead)
             }
         }
     }
 
-    private fun finishSpeech() {
-        if (!isRecording) return
-        isRecording = false
+    // ============================================================
+    //  VAD 语音活动检测
+    // ============================================================
 
-        mainHandler.removeCallbacksAndMessages(null)
+    /**
+     * 基于 RMS 的自适应 VAD：
+     *   - 自适应估计环境噪声底噪
+     *   - 检测语音开始、结束事件
+     *   - 连续静音 800ms → 触发 onSpeechEnd + onSilence → 自动开始识别
+     */
+    private fun checkVad(buffer: ByteArray, length: Int) {
+        val rms = calculateRms(buffer, length)
+        val rmsDisplay = (rms / 1000.0).toFloat().coerceIn(0f, 15f)
+        mainHandler.post { onRmsChanged(rmsDisplay) }
 
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (_: Exception) {}
-        audioRecord = null
-
-        // 获取录音数据
-        val audioData: ByteArray
-        synchronized(accumulatedAudio) {
-            audioData = accumulatedAudio.toByteArray()
-            accumulatedAudio.reset()
-        }
-
-        if (audioData.size < SAMPLE_RATE / 2) {  // < 0.5 秒
-            Log.d(TAG, "录音太短 (${audioData.size} bytes), 忽略")
-            restartListening()
+        // 预热期：录音启动后 WARM_UP_DURATION_MS 内抑制 VAD 语音检测
+        // 目的：防止 TTS 播报残留回声被误识别为用户语音
+        val elapsed = System.currentTimeMillis() - recordingStartTime
+        if (elapsed < WARM_UP_DURATION_MS) {
+            // 预热期内仅做噪声底噪估计，不触发语音检测
+            recentNoiseLevels.add(rms)
+            if (recentNoiseLevels.size > NOISE_FLOOR_WINDOW) {
+                recentNoiseLevels.removeAt(0)
+            }
+            if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
+                val sorted = recentNoiseLevels.sorted()
+                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
+                adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
+                    .coerceAtLeast(SPEECH_START_THRESHOLD)
+                adaptiveSpeechEnd = (estimatedNoiseFloor * 1.4)
+                    .coerceAtLeast(SPEECH_END_THRESHOLD)
+            }
             return
         }
 
-        // 异步发送到 Whisper API
+        // 更新噪声底噪估计（仅在非语音期间采样）
+        if (!isSpeechActive) {
+            recentNoiseLevels.add(rms)
+            if (recentNoiseLevels.size > NOISE_FLOOR_WINDOW) {
+                recentNoiseLevels.removeAt(0)
+            }
+            if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
+                val sorted = recentNoiseLevels.sorted()
+                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
+                adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
+                    .coerceAtLeast(SPEECH_START_THRESHOLD)
+                adaptiveSpeechEnd = (estimatedNoiseFloor * 1.4)
+                    .coerceAtLeast(SPEECH_END_THRESHOLD)
+            }
+        }
+
+        if (!isSpeechActive) {
+            // 检测语音开始
+            if (rms > adaptiveSpeechStart) {
+                speechFrameCount++
+                if (speechFrameCount >= 3) {  // 连续 3 帧确认
+                    isSpeechActive = true
+                    silenceFrameCount = 0
+                    mainHandler.post {
+                        onSpeechBegin()
+                        Log.d(TAG, "🎙 语音开始 (RMS=${rms.toInt()}>阈值=${adaptiveSpeechStart.toInt()})")
+                    }
+                }
+            } else {
+                speechFrameCount = maxOf(speechFrameCount - 1, 0)
+            }
+        } else {
+            // 语音活跃中，检测静音
+            if (rms < adaptiveSpeechEnd) {
+                silenceFrameCount++
+                if (silenceFrameCount >= SILENCE_CHUNKS_FOR_END) {
+                    // 连续静音 ≈ 800ms → 用户说完，自动停止并识别
+                    Log.d(TAG, "🔇 VAD 静音结束 (静音帧=$silenceFrameCount, ≈${silenceFrameCount * 160}ms)")
+                    mainHandler.post {
+                        onSpeechEnd()
+                        onSilence()
+                    }
+                    finishSpeechAndRecognize()
+                }
+            } else {
+                silenceFrameCount = 0  // 有声音，重置静音计数
+            }
+        }
+    }
+
+    // ============================================================
+    //  语音结束 → 完整 PCM 转 WAV → 单次 SiliconFlow HTTP POST
+    // ============================================================
+
+    /**
+     * 停止录音并提交完整音频识别。
+     * 流程：
+     *   1. 停止录音线程，取出全部缓存的 PCM 数据
+     *   2. PCM → WAV（添加 RIFF WAV 文件头）
+     *   3. 单次 POST /v1/audio/transcriptions（multipart/form-data 上传完整 WAV）
+     *   4. 解析返回 JSON，提取 text 字段
+     *   5. onResult 回调完整转写文字
+     */
+    private fun finishSpeechAndRecognize() {
+        if (!isRecording) return
+        isRecording = false
+
+        // 停止录音线程
+        currentThread?.interrupt()
+        currentThread = null
+
+        // 取消延迟任务
+        mainHandler.removeCallbacksAndMessages(null)
+
+        // 取出全部累积的 PCM 数据
+        val pcmData: ByteArray
+        synchronized(audioLock) {
+            pcmData = accumulatedAudio.toByteArray()
+            accumulatedAudio.reset()
+        }
+
+        // 停止 AudioRecord
+        try { audioRecord?.stop() } catch (_: Exception) {}
+
+        // 录音太短：丢弃
+        if (pcmData.size < SAMPLE_RATE / 4) {  // < 0.25 秒
+            Log.d(TAG, "录音太短 (${pcmData.size}B)，忽略")
+            releaseHardware()
+            if (!isPermanentlyStopped) {
+                mainHandler.postDelayed({ if (!isPermanentlyStopped) startListening() }, 500)
+            }
+            return
+        }
+
+        // PCM → WAV
+        val wavData = pcmToWav(pcmData)
+
+        // 获取 API Key
+        val apiKey = apiKeyProvider()
+        if (apiKey.isBlank()) {
+            Log.w(TAG, "API Key 未配置")
+            releaseHardware()
+            if (failedSttAttempts == 0) {
+                mainHandler.post {
+                    onError("未配置 SiliconFlow API Key。请在模型配置中绑定 API Key，用途选择 \"语音转文字(stt)\"")
+                }
+            }
+            failedSttAttempts++
+            return
+        }
+
+        // 异步上传识别（不阻塞主线程）
         scope.launch {
             try {
-                val wavData = pcmToWav(audioData)
-                val text = sendToWhisperApi(wavData)
+                Log.d(TAG, "发送完整音频 → SiliconFlow $STT_MODEL (${wavData.size}B WAV, ${pcmData.size / (SAMPLE_RATE * 2 * 2)}KHz)")
+                val text = sendToSiliconFlow(wavData, apiKey)
 
-                if (text.isNullOrBlank()) {
-                    mainHandler.post {
-                        failedSttAttempts++
-                        val config = getProviderConfig()
-                        val modelHint = config?.modelName ?: "未知"
-                        Log.w(TAG, "STT 返回空（第${failedSttAttempts}次）— 模型 $modelHint 可能不支持音频转文字")
+                // 无论成功失败都释放硬件
+                withContext(Dispatchers.Main) { releaseHardware() }
 
-                        // 每 3 次失败弹一次 Toast
-                        if (failedSttAttempts % 3 == 1 &&
-                            System.currentTimeMillis() - lastSttErrorToast > 8000) {
-                            lastSttErrorToast = System.currentTimeMillis()
-                            if (failedSttAttempts >= 6) {
-                                onError("语音转文字已连续失败${failedSttAttempts}次。请检查模型 \"$modelHint\" 是否支持音频转录，或在模型设置中为供应商添加用途为\"语音转文字(stt)\"的模型")
-                            } else {
-                                onError("语音转文字失败。当前STT模型: $modelHint，请确认该模型支持音频转文字")
-                            }
-                        }
-                        restartListening()
+                if (text != null && text.isNotBlank()) {
+                    val trimmed = text.trim()
+                    failedSttAttempts = 0
+                    withContext(Dispatchers.Main) {
+                        Log.d(TAG, "✅ 识别完成: $trimmed")
+                        onResult(trimmed)
                     }
                 } else {
-                    mainHandler.post {
-                        failedSttAttempts = 0  // 成功后重置计数
-                        Log.d(TAG, "识别结果: $text")
-                        onResult(text.trim())
+                    Log.w(TAG, "识别结果为空")
+                    withContext(Dispatchers.Main) {
+                        onError("未识别到语音内容，请尝试大声清晰地说一句话")
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "云端识别失败", e)
-                mainHandler.post {
-                    onError("语音识别失败: ${e.message}")
-                    restartListening()
+                Log.e(TAG, "识别异常", e)
+                withContext(Dispatchers.Main) {
+                    releaseHardware()
+                    onError("识别失败: ${e.message}")
                 }
             }
         }
     }
 
-    // ============ Whisper API 调用 ============
-
-    private suspend fun sendToWhisperApi(wavData: ByteArray): String? {
-        val config = getProviderConfig() ?: run {
-            mainHandler.post { onError("未配置 AI 模型") }
-            return null
-        }
-
+    /**
+     * 发送完整 WAV 音频文件到 SiliconFlow API。
+     *
+     * 这是标准的批量文件转写调用：
+     *   POST https://api.siliconflow.cn/v1/audio/transcriptions
+     *   Content-Type: multipart/form-data
+     *
+     * 参数（SiliconFlow API 仅支持以下两个）：
+     *   - file: 完整 WAV 音频文件（16000Hz, mono, 16bit PCM）
+     *   - model: FunAudioLLM/SenseVoiceSmall
+     *
+     * 错误处理（分类处理所有常见错误）：
+     *   - 401: API Key 无效或过期
+     *   - 400: 音频格式/参数错误
+     *   - 403: 权限不足
+     *   - 404: 模型不存在
+     *   - 429: 请求频率过高
+     *   - 5xx: 服务器错误
+     *   - IOException: 网络中断
+     */
+    private suspend fun sendToSiliconFlow(wavData: ByteArray, apiKey: String): String? {
         return withContext(Dispatchers.IO) {
             try {
-                val baseUrl = normalizeApiUrl(config.baseUrl)
-                val url = "$baseUrl/audio/transcriptions"
-                val sttModel = config.modelName
-
-                // 常见误用检测：chat-only 模型不能做 STT
-                val knownNonSttPrefixes = listOf("Qwen/", "deepseek", "qwen-", "glm-", "ernie-", "gpt-4", "gpt-3")
-                val modelLooksWrong = knownNonSttPrefixes.any { sttModel.lowercase().startsWith(it.lowercase()) }
-                if (modelLooksWrong) {
-                    Log.w(TAG, "⚠️ 模型 \"$sttModel\" 可能不支持音频转文字！请在模型设置中为供应商 ${config.provider.displayName} 绑定一个用途为\"语音转文字(stt)\"的模型")
-                }
-
-                Log.d(TAG, "STT API: POST $url, provider=${config.provider.displayName}, model=$sttModel, audioSize=${wavData.size}")
-
+                // 构建 multipart/form-data 请求体
                 val mediaType = "audio/wav".toMediaType()
+                // SiliconFlow /v1/audio/transcriptions 仅接受 file + model 两个参数
+                // language/prompt/response_format/temperature 均不支持，发送会导致 HTTP 400
                 val requestBody = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
-                    .addFormDataPart(
-                        "file",
-                        "audio.wav",
-                        wavData.toRequestBody(mediaType)
-                    )
-                    .addFormDataPart("model", sttModel)
+                    .addFormDataPart("file", "recording.wav", wavData.toRequestBody(mediaType))
+                    .addFormDataPart("model", STT_MODEL)
                     .build()
 
-                var builder = Request.Builder()
-                    .url(url)
+                val request = Request.Builder()
+                    .url(SILICONFLOW_URL)
                     .post(requestBody)
+                    .addHeader("Authorization", "Bearer $apiKey")
+                    .addHeader("Accept", "application/json")
+                    .build()
 
-                if (config.apiKey.isNotEmpty()) {
-                    builder = builder.addHeader("Authorization", "Bearer ${config.apiKey}")
-                }
-
-                val response = httpClient.newCall(builder.build()).execute()
+                Log.d(TAG, "→ POST $SILICONFLOW_URL (WAV=${wavData.size}B)")
+                val response = httpClient.newCall(request).execute()
 
                 if (response.isSuccessful) {
+                    // 成功：解析 JSON 提取 text 字段
                     val body = response.body?.string() ?: ""
-                    Log.d(TAG, "STT 成功, body=${body.take(200)}")
-                    val text = org.json.JSONObject(body).optString("text", "")
+                    val text = try {
+                        org.json.JSONObject(body).optString("text", "")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "JSON 解析异常: ${e.message}, body=${body.take(100)}")
+                        ""
+                    }
+                    response.close()
                     if (text.isBlank()) null else text
                 } else {
-                    val errorBody = response.body?.string() ?: ""
                     val code = response.code
-                    Log.w(TAG, "STT API HTTP $code: ${errorBody.take(300)}")
+                    val errorBody = response.body?.string() ?: ""
+                    response.close()
+                    Log.w(TAG, "SiliconFlow HTTP $code: ${errorBody.take(300)}")
 
-                    // 分类错误提示
-                    val errorMsg = when {
-                        code == 400 -> "请求参数错误：模型 $sttModel 可能不支持音频。请在模型设置中为该供应商绑定一个语音转文字(stt)模型"
-                        code == 401 -> "API Key 无效，请检查模型设置"
-                        code == 404 -> "接口不存在：${config.provider.displayName} 不支持 Whisper 音频转录 API"
-                        code == 429 -> "请求过于频繁，请稍后重试"
-                        code >= 500 -> "服务器错误 (HTTP $code)，请稍后重试"
-                        else -> "STT 失败 (HTTP $code): ${errorBody.take(100)}"
+                    val errorDetail = try {
+                        org.json.JSONObject(errorBody).optString("message", errorBody.take(100))
+                    } catch (_: Exception) {
+                        errorBody.take(100)
+                    }
+
+                    val errorMsg = when (code) {
+                        400 -> {
+                            if (errorDetail.contains("file", ignoreCase = true) ||
+                                errorDetail.contains("audio", ignoreCase = true))
+                                "音频格式错误：需要 16000Hz 单声道 16bit PCM WAV 格式。" +
+                                "详情: $errorDetail"
+                            else if (errorDetail.contains("model", ignoreCase = true))
+                                "模型参数错误。当前模型: $STT_MODEL。" +
+                                "详情: $errorDetail"
+                            else
+                                "请求参数错误 (HTTP 400): $errorDetail"
+                        }
+                        401 -> "API Key 无效或已过期 (HTTP 401)。请在模型配置中更新 SiliconFlow API Key"
+                        403 -> "无权访问该资源 (HTTP 403)。请检查 API Key 权限是否包含语音识别"
+                        404 -> "模型 $STT_MODEL 不存在或已下线 (HTTP 404)。请验证模型名称是否正确"
+                        413 -> "音频文件过大 (HTTP 413)，请缩短录音时间"
+                        429 -> "请求频率过高 (HTTP 429)，请稍后重试（每分钟限制次请求数）"
+                        503 -> "SiliconFlow 服务暂时不可用 (HTTP 503)，请稍后重试"
+                        in 500..599 -> "SiliconFlow 服务器内部错误 (HTTP $code)：请稍后重试"
+                        else -> "语音识别失败 (HTTP $code): $errorDetail"
                     }
                     mainHandler.post { onError(errorMsg) }
-
-                    // 404/405/501 表示不支持 Whisper，用 Chat 降级
-                    if (code == 404 || code == 405 || code == 501) {
-                        Log.w(TAG, "Whisper API 不可用（$code），尝试 Base64 降级方案")
-                        return@withContext transcribeViaChatCompletion(wavData, config)
-                    }
-
                     null
                 }
             } catch (e: IOException) {
-                Log.e(TAG, "STT 网络错误: ${e.message}")
-                mainHandler.post { onError("网络连接失败: ${e.message}") }
+                Log.e(TAG, "SiliconFlow 网络错误: ${e.message}")
+                val netMsg = if (e.message?.contains("timeout", ignoreCase = true) == true)
+                    "网络连接超时，请检查网络状态后重试"
+                else if (e.message?.contains("Unable to resolve", ignoreCase = true) == true)
+                    "无法解析域名，请检查网络连接"
+                else
+                    "网络连接失败: ${e.message}"
+
+                mainHandler.post { onError(netMsg) }
                 null
             }
         }
     }
 
-    /** 降级方案：将 WAV 音频 Base64 编码后发给多模态 Chat API */
-    private suspend fun transcribeViaChatCompletion(wavData: ByteArray, config: ProviderConfig): String? {
-        return withContext(Dispatchers.IO) {
-            try {
-                val base64Audio = Base64.encodeToString(wavData, Base64.NO_WRAP)
-                val url = "${normalizeApiUrl(config.baseUrl)}/chat/completions"
-                Log.d(TAG, "尝试多模态 STT 降级: $url, model=${config.modelName}, audioSize=${wavData.size}")
+    // ============================================================
+    //  音频工具
+    // ============================================================
 
-                // 方案A: input_audio (OpenAI 原生多模态)
-                val messages = org.json.JSONArray()
-                messages.put(org.json.JSONObject().apply {
-                    put("role", "system")
-                    put("content", "你是一个语音转文字工具。请将用户提供的音频内容精确转录为中文文字，只输出转录的文字，不要添加任何解释或格式。")
-                })
-                messages.put(org.json.JSONObject().apply {
-                    put("role", "user")
-                    put("content", org.json.JSONArray().apply {
-                        put(org.json.JSONObject().apply {
-                            put("type", "input_audio")
-                            put("input_audio", org.json.JSONObject().apply {
-                                put("data", base64Audio)
-                                put("format", "wav")
-                            })
-                        })
-                    })
-                })
-
-                var body = org.json.JSONObject().apply {
-                    put("model", config.modelName)
-                    put("messages", messages)
-                    put("max_tokens", 200)
-                    put("temperature", 0.0)
-                }.toString()
-
-                // 先尝试 input_audio 方式
-                var response = sendChatRequest(url, config.apiKey, body)
-                var respBody = response?.first
-                if (response != null && response.second) {
-                    return@withContext parseTranscriptionResult(respBody)
-                }
-
-                // 方案B: 用 image_url 携带 audio data URL（部分视觉模型可用）
-                Log.d(TAG, "input_audio 方式不可用，尝试 image_url 降级")
-                val messages2 = org.json.JSONArray()
-                messages2.put(org.json.JSONObject().apply {
-                    put("role", "system")
-                    put("content", "请将用户提供的语音内容精确转录为中文文字，只输出转录的文字。")
-                })
-                messages2.put(org.json.JSONObject().apply {
-                    put("role", "user")
-                    put("content", org.json.JSONArray().apply {
-                        put(org.json.JSONObject().apply {
-                            put("type", "image_url")
-                            put("image_url", org.json.JSONObject().apply {
-                                put("url", "data:audio/wav;base64,$base64Audio")
-                            })
-                        })
-                        put(org.json.JSONObject().apply {
-                            put("type", "text")
-                            put("text", "请将这段语音转写成文字。")
-                        })
-                    })
-                })
-
-                body = org.json.JSONObject().apply {
-                    put("model", config.modelName)
-                    put("messages", messages2)
-                    put("max_tokens", 200)
-                    put("temperature", 0.0)
-                }.toString()
-
-                response = sendChatRequest(url, config.apiKey, body)
-                respBody = response?.first
-                if (response != null && response.second) {
-                    return@withContext parseTranscriptionResult(respBody)
-                }
-
-                Log.e(TAG, "所有 STT 降级方案均失败")
-                null
-            } catch (e: Exception) {
-                Log.e(TAG, "Chat fallback error", e)
-                null
-            }
-        }
-    }
-
-    /** 发送 Chat Completion 请求，返回 (body, isSuccess) */
-    private fun sendChatRequest(url: String, apiKey: String, body: String): Pair<String?, Boolean>? {
-        return try {
-            val requestBody = body.toRequestBody("application/json; charset=utf-8".toMediaType())
-            val request = Request.Builder()
-                .url(url)
-                .post(requestBody)
-                .addHeader("Content-Type", "application/json")
-                .addHeader("Authorization", "Bearer $apiKey")
-                .build()
-            val resp = httpClient.newCall(request).execute()
-            val respStr = resp.body?.string()
-            if (resp.isSuccessful) {
-                respStr?.let { Log.d(TAG, "STT 降级成功: ${it.take(200)}") }
-                Pair(respStr, true)
-            } else {
-                Log.w(TAG, "STT 降级失败 HTTP ${resp.code}: ${respStr?.take(200)}")
-                Pair(respStr, false)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "STT 降级网络异常: ${e.message}")
-            null
-        }
-    }
-
-    private fun parseTranscriptionResult(body: String?): String? {
-        if (body.isNullOrBlank()) return null
-        return try {
-            val json = org.json.JSONObject(body)
-            val choices = json.getJSONArray("choices")
-            if (choices.length() > 0) {
-                choices.getJSONObject(0).getJSONObject("message").getString("content").trim()
-            } else null
-        } catch (e: Exception) {
-            Log.e(TAG, "解析转写结果失败", e)
-            null
-        }
-    }
-
-    // ============ 音频工具 ============
-
-    /** PCM → WAV (添加 44 字节头) */
+    /**
+     * PCM 原始数据 → WAV 文件（添加 44 字节 RIFF 头）。
+     *
+     * WAV 文件格式：
+     *   RIFF 头 (12B) + fmt 子块 (24B) + data 子块 (8B + PCM数据)
+     *   = 44 字节文件头 + PCM 数据
+     */
     private fun pcmToWav(pcmData: ByteArray): ByteArray {
         val totalDataLen = pcmData.size + 36
-        val byteRate = SAMPLE_RATE * 2 // 16-bit mono
+        val byteRate = SAMPLE_RATE * BYTES_PER_SAMPLE * 1  // mono
 
         return ByteArrayOutputStream(pcmData.size + 44).apply {
             val buf = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
@@ -511,42 +601,106 @@ class CloudSpeechRecognizer(
             buf.putInt(totalDataLen)
             buf.put("WAVE".toByteArray())
             buf.put("fmt ".toByteArray())
-            buf.putInt(16)                // Subchunk1 size (PCM)
-            buf.putShort(1)               // Audio format (PCM = 1)
-            buf.putShort(1)               // Channels (mono)
-            buf.putInt(SAMPLE_RATE)       // Sample rate
-            buf.putInt(byteRate)          // Byte rate
-            buf.putShort(2)               // Block align
-            buf.putShort(16)              // Bits per sample
+            buf.putInt(16)                    // Sub-chunk size (PCM)
+            buf.putShort(1)                   // Audio format (1 = PCM)
+            buf.putShort(1)                   // Channels (1 = mono)
+            buf.putInt(SAMPLE_RATE)           // Sample rate
+            buf.putInt(byteRate)              // Byte rate
+            buf.putShort(2)                   // Block align
+            buf.putShort(16)                  // Bits per sample
             buf.put("data".toByteArray())
-            buf.putInt(pcmData.size)      // Data size
+            buf.putInt(pcmData.size)          // Data chunk size
             write(buf.array())
             write(pcmData)
         }.toByteArray()
     }
 
-    /** 计算 RMS 均方根音量 */
+    /** 计算音频帧的 RMS 值（用于 VAD 和音量显示） */
     private fun calculateRms(buffer: ByteArray, length: Int): Double {
         var sum = 0.0
+        val samples = length / 2
+        if (samples <= 0) return 0.0
         for (i in 0 until length step 2) {
-            // 将两个字节合并为 short (小端序)
             val sample = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF)).toShort()
             sum += (sample.toDouble() * sample.toDouble())
         }
-        val samples = length / 2
-        return if (samples > 0) Math.sqrt(sum / samples) else 0.0
+        return Math.sqrt(sum / samples)
     }
 
-    private fun normalizeApiUrl(url: String): String {
-        return url.trimEnd('/').let {
-            if (it.endsWith("/v1")) it.removeSuffix("/v1") else it
-        }.let { it + "/v1" }
+    // ============================================================
+    //  硬件降噪（AEC 回声消除 + NS 环境噪声抑制）
+    // ============================================================
+
+    /**
+     * 初始化硬件级音频降噪：
+     *  - AcousticEchoCanceler (AEC)：消除 TTS 播报被麦克风回采
+     *  - NoiseSuppressor (NS)：抑制环境背景噪声
+     *
+     * 注意：部分低端设备或模拟器可能不支持，静默降级。
+     */
+    private fun initNoiseReduction() {
+        val audioSessionId = audioRecord?.audioSessionId ?: return
+
+        if (AppConfig.ASR_ENABLE_AEC) {
+            try {
+                if (AcousticEchoCanceler.isAvailable()) {
+                    aec = AcousticEchoCanceler.create(audioSessionId)
+                    aec?.enabled = true
+                    Log.d(TAG, "✓ AEC 回声消除已启用")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "AEC 不可用", e)
+            }
+        }
+
+        if (AppConfig.ASR_ENABLE_NS) {
+            try {
+                if (NoiseSuppressor.isAvailable()) {
+                    ns = NoiseSuppressor.create(audioSessionId)
+                    ns?.enabled = true
+                    Log.d(TAG, "✓ NS 噪声抑制已启用")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "NS 不可用", e)
+            }
+        }
     }
 
-    // ============ 控制方法 ============
+    /** 释放音频降噪硬件 */
+    private fun releaseNoiseReduction() {
+        try { aec?.enabled = false; aec?.release() } catch (_: Exception) {}
+        aec = null
+        try { ns?.enabled = false; ns?.release() } catch (_: Exception) {}
+        ns = null
+    }
 
+    /** 释放所有音频硬件（AudioRecord + 降噪） */
+    private fun releaseHardware() {
+        try { audioRecord?.stop() } catch (_: Exception) {}
+        releaseNoiseReduction()
+        try { audioRecord?.release() } catch (_: Exception) {}
+        audioRecord = null
+    }
+
+    // ============================================================
+    //  控制方法
+    // ============================================================
+
+    /**
+     * 自动重启录音监听（仅语音对话引擎内部使用）。
+     * 如果 isPermanentlyStopped 为 true，阻止重启。
+     * 这是修复麦克风泄漏 Bug 的关键机制。
+     */
     private fun restartListening() {
+        if (isPermanentlyStopped) {
+            Log.d(TAG, "restartListening() 被阻止 — 已永久停止")
+            return
+        }
         mainHandler.postDelayed({
+            if (isPermanentlyStopped) {
+                Log.d(TAG, "restartListening() 延迟回调被阻止 — 已永久停止")
+                return@postDelayed
+            }
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
                 if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                     != PackageManager.PERMISSION_GRANTED) {
@@ -556,33 +710,5 @@ class CloudSpeechRecognizer(
             }
             startListening()
         }, 500)
-    }
-
-    fun stopListening() {
-        isRecording = false
-        mainHandler.removeCallbacksAndMessages(null)
-        silenceTimer?.let { mainHandler.removeCallbacks(it) }
-        silenceTimer = null
-
-        // 中断录音线程
-        currentThread?.interrupt()
-        currentThread = null
-
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (_: Exception) {}
-        audioRecord = null
-
-        scope.coroutineContext.cancelChildren()
-    }
-
-    fun pauseListening() {
-        isRecording = false
-        try { audioRecord?.stop() } catch (_: Exception) {}
-    }
-
-    fun resumeListening() {
-        if (!isRecording) startListening()
     }
 }

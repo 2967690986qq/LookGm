@@ -102,17 +102,44 @@ class PreferencesManager(context: Context) {
         return baseConfig.forPurpose("analysis")
     }
 
-    /** 获取语音转文字模型配置 */
+    /** 获取语音转文字模型配置 — 跨所有云供应商搜索 STT 模型 */
     fun getSttModelConfig(): ProviderConfig? {
-        val baseConfig = getCurrentProviderConfig()
-        if (baseConfig.models.isEmpty()) {
-            // 无多模型绑定 → 用供应商默认 STT 模型
-            val defaultStt = baseConfig.provider.defaultSttModel
-            return if (defaultStt.isNotBlank()) baseConfig.copy(modelName = defaultStt)
-            else baseConfig  // 无 STT 能力的供应商
+        // 1. 先检查当前供应商
+        val sttFromCurrent = pickSttFromProvider(getCurrentProviderConfig())
+        if (sttFromCurrent != null) return sttFromCurrent
+
+        // 2. 跨所有已配置的云供应商搜索
+        val allConfigs = loadConfig().cloudProviderConfigs
+        for ((name, config) in allConfigs) {
+            if (name == getCurrentProvider().name) continue // 已检查过
+            val sttConfig = pickSttFromProvider(config)
+            if (sttConfig != null) return sttConfig
         }
-        // 有多模型绑定 → 走 forPurpose 智能 fallback（优先 stt 标签 → defaultSttModel → all → 原模型）
-        return baseConfig.forPurpose("stt")
+
+        // 3. 所有供应商都没有 STT 模型
+        return null
+    }
+
+    /**
+     * 从单个供应商配置中提取 STT 模型。
+     * 拒绝 fallback 到非 STT 模型 — 没有明确 STT 标签就返回 null，
+     * 避免聊天模型的 API Key 被错误发给 STT 接口导致 401。
+     */
+    private fun pickSttFromProvider(config: ProviderConfig): ProviderConfig? {
+        if (config.apiKey.isBlank()) return null
+        if (config.models.isEmpty()) {
+            // 无多模型绑定：仅当供应商有声明 defaultSttModel 时使用
+            val defaultStt = config.provider.defaultSttModel
+            return if (defaultStt.isNotBlank())
+                config.copy(modelName = defaultStt)
+            else null
+        }
+        // 有多模型绑定：查找 usedFor=="stt" 的模型
+        val sttBinding = config.models.firstOrNull { it.usedFor == "stt" }
+            ?: config.models.firstOrNull { it.matches("all") && config.provider.defaultSttModel.isNotBlank() }
+        return if (sttBinding != null)
+            config.copy(modelName = sttBinding.modelName)
+        else null
     }
 
     // ========== 通用读写 ==========

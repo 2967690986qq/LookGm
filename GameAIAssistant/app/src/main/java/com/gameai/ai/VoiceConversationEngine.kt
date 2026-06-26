@@ -108,7 +108,7 @@ object VoiceConversationEngine {
                     transitionState(State.IDLE)
                     Handler(Looper.getMainLooper()).postDelayed({
                         if (isActive && !isListeningPaused) startListening()
-                    }, 300)  // 300ms 停顿，自然过渡
+                    }, 1000)  // 1秒停顿，确保 TTS 播报音频完全消散后再开始录音
                 } else if (isListeningPaused) {
                     // 暂停聆听时，停留在 IDLE 不自动重启
                     transitionState(State.IDLE)
@@ -129,6 +129,9 @@ object VoiceConversationEngine {
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         appContext = null
         VoiceService.onSpeakDone = null
+        // 释放最新的屏幕截图
+        latestBitmap?.recycle()
+        latestBitmap = null
     }
 
     // ============================================================
@@ -178,18 +181,29 @@ object VoiceConversationEngine {
     }
 
     fun stopConversation() {
+        android.util.Log.i(TAG, "stopConversation() — 彻底停止语音对话")
         isActive = false
         continuousConversation = false
         isListeningPaused = false
+
+        // 1. 先停止 STT 录音（CloudSpeechRecognizer 内部会设置 isPermanentlyStopped=true）
         stopListening()
+
+        // 2. 取消 SSE 流式请求
         cancelStreamingCall()
+
+        // 3. 停止 TTS 并清空播报队列
         VoiceService.stopSpeaking()
         VoiceService.clearSpeakQueue()
+
+        // 4. 重置状态
         spokenSentenceCount = 0
         currentCommand = null
         VoiceCommandHandler.setConversationActive(false)
         transitionState(State.IDLE)
         cancelIdleTimer()
+
+        android.util.Log.i(TAG, "stopConversation() 完成 — 麦克风已永久释放")
     }
 
     fun isConversationActive(): Boolean = isActive
@@ -290,9 +304,13 @@ object VoiceConversationEngine {
             }
         }
 
+        // 从配置中提取 STT 模型的 API Key（SiliconFlow）
+        val sttConfig = getSttConfig()
+        val sttApiKey = sttConfig?.apiKey ?: ""
+
         VoiceService.startListening(
             context = ctx,
-            getModelConfig = { getSttConfig() },
+            apiKey = sttApiKey,
             onResult = sttOnResult,
             onError = sttOnError,
             onReady = {
@@ -318,13 +336,8 @@ object VoiceConversationEngine {
                 }
             },
             onSilence = {
-                android.util.Log.d(TAG, "静默超时，重启监听")
-                if (isActive) {
-                    VoiceService.stopListening()
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (isActive) startListening()
-                    }, 200)
-                }
+                android.util.Log.d(TAG, "静默超时 (VAD)，开始识别")
+                // VAD 静音结束 → CloudSpeechRecognizer 自动完成识别并回调 onResult
             }
         )
     }
@@ -366,6 +379,10 @@ object VoiceConversationEngine {
                 // 分句 TTS：检测到句子结束符，立即播报该句子
                 val newSentences = extractNewSentences(accumulatedText)
                 if (newSentences > spokenSentenceCount) {
+                    // 第一句开始播报时，切换到 SPEAKING 状态（onSpeakDone 依赖此状态触发下一轮聆听）
+                    if (spokenSentenceCount == 0) {
+                        transitionState(State.SPEAKING)
+                    }
                     val sentences = splitSentences(accumulatedText)
                     // 播报未播放的句子
                     for (i in spokenSentenceCount until newSentences) {
@@ -395,10 +412,17 @@ object VoiceConversationEngine {
 
                 // 播报剩余未播放的句子
                 val sentences = splitSentences(fullText)
-                for (i in spokenSentenceCount until sentences.size) {
-                    val s = sentences[i].trim()
-                    if (s.isNotEmpty()) {
-                        VoiceService.speak(appContext!!, s)
+                val remainingCount = sentences.size - spokenSentenceCount
+                if (remainingCount > 0) {
+                    // 确保状态为 SPEAKING，以便 onSpeakDone 能正确触发下一轮聆听
+                    if (state != State.SPEAKING) {
+                        transitionState(State.SPEAKING)
+                    }
+                    for (i in spokenSentenceCount until sentences.size) {
+                        val s = sentences[i].trim()
+                        if (s.isNotEmpty()) {
+                            VoiceService.speak(appContext!!, s)
+                        }
                     }
                 }
 
@@ -600,9 +624,10 @@ object VoiceConversationEngine {
             resetIdleTimer()
         }
 
-        // 进入 SPEAKING 后重新启用打断检测
+        // 进入 SPEAKING：暂停麦克风录音，防止 TTS 播报被 STT 自识别
         if (newState == State.SPEAKING) {
             isBargingIn = false
+            VoiceService.pauseListening()
         }
     }
 

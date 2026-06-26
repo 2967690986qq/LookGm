@@ -171,7 +171,11 @@ class ScreenCaptureService : Service() {
 
                         if (bitmap != null) {
                             // 把最新帧喂给语音对话引擎（豆包模式：边看边聊）
-                            com.gameai.ai.VoiceConversationEngine.latestBitmap = bitmap
+                            // 注意：必须 copy 一份，因为当前 bitmap 在本帧结束后会被 recycle
+                            val oldBitmap = com.gameai.ai.VoiceConversationEngine.latestBitmap
+                            val newBitmap = bitmap.copy(bitmap.config, false)
+                            com.gameai.ai.VoiceConversationEngine.latestBitmap = newBitmap
+                            oldBitmap?.recycle()
 
                             val now = System.currentTimeMillis()
 
@@ -307,6 +311,10 @@ class ScreenCaptureService : Service() {
 
         textRecognizer?.release()
         textRecognizer = null
+
+        // 释放语音对话引擎中的bitmap引用
+        com.gameai.ai.VoiceConversationEngine.latestBitmap?.recycle()
+        com.gameai.ai.VoiceConversationEngine.latestBitmap = null
 
         ScreenAnalysisEngine.release()
 

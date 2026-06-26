@@ -65,8 +65,18 @@ class GameWSServer:
                 msg_type = msg.get("type", "")
 
                 if msg_type == "register":
-                    device_id = msg.get("device_id", "unknown")
-                    game_name = msg.get("game_name", "未知游戏")
+                    # 解析注册消息（兼容Android端格式：payload是JSON字符串）
+                    payload = msg.get("payload", "{}")
+                    if isinstance(payload, str):
+                        try:
+                            register_data = json.loads(payload)
+                        except json.JSONDecodeError:
+                            register_data = {}
+                    else:
+                        register_data = payload if isinstance(payload, dict) else {}
+                    
+                    device_id = register_data.get("device_id", msg.get("device_id", "unknown"))
+                    game_name = register_data.get("game_name", msg.get("game_name", "未知游戏"))
                     self._connections[device_id] = websocket
                     self._match_states[device_id] = {
                         "device_id": device_id,
@@ -77,26 +87,33 @@ class GameWSServer:
                         "connected_at": time.time()
                     }
                     logger.info(f"设备连接: {device_id} ({game_name})")
-                    await self._send(websocket, {
-                        "type": "registered",
-                        "device_id": device_id,
-                        "model_status": self.model_manager.get_status() if self.model_manager else {"ready": False}
+                    await self._send_ws(websocket, "match_status", json.dumps({
+                        "status": "connected",
+                        "detail": "设备已注册"
+                    }))
+
+                elif msg_type == "frame":
+                    # 接收帧数据（Android端格式：payload是base64字符串）
+                    frame_b64 = msg.get("payload", "")
+                    await self._handle_frame(device_id, websocket, {
+                        "frame": frame_b64,
+                        "timestamp": msg.get("timestamp", 0),
+                        "match_id": msg.get("match_id", "")
                     })
 
-                elif msg_type == "frame_data":
-                    # 接收帧数据
-                    await self._handle_frame(device_id, websocket, msg)
+                elif msg_type == "game_state":
+                    # 状态更新（Android端格式：payload是状态字符串）
+                    game_state = msg.get("payload", "lobby")
+                    await self._handle_status_update(device_id, {"game_state": game_state})
 
-                elif msg_type == "game_event":
-                    # 游戏事件
-                    await self._handle_game_event(device_id, websocket, msg)
+                elif msg_type == "heartbeat":
+                    # 心跳（Android端格式）
+                    await self._send_ws(websocket, "heartbeat", "pong")
 
-                elif msg_type == "status_update":
-                    # 状态更新 (game_state: lobby/select/in_game/result)
-                    await self._handle_status_update(device_id, msg)
-
-                elif msg_type == "ping":
-                    await self._send(websocket, {"type": "pong", "timestamp": int(time.time() * 1000)})
+                elif msg_type == "voice":
+                    # 语音指令（Android端格式）
+                    voice_text = msg.get("payload", "")
+                    logger.info(f"[{device_id}] 收到语音指令: {voice_text}")
 
                 elif msg_type == "get_models":
                     if self.model_manager:
@@ -121,12 +138,12 @@ class GameWSServer:
     async def _handle_frame(self, device_id: str, websocket, msg: Dict):
         """处理帧数据"""
         frame_b64 = msg.get("frame", "")
-        game_state = msg.get("game_state", "in_game")
+        match_id = msg.get("match_id", "")
         timestamp = msg.get("timestamp", 0)
 
-        # 更新对局状态
-        if device_id in self._match_states:
-            self._match_states[device_id]["phase"] = game_state
+        # 获取当前对局状态
+        match_state = self._match_states.get(device_id, {})
+        game_state = match_state.get("phase", "in_game")
 
         # 控制分析频率（冷却）
         now = time.time()
@@ -137,18 +154,19 @@ class GameWSServer:
         self._last_analysis_time[device_id] = now
 
         # 本地评分引擎计算
-        local_result = self.scoring_engine.calculate_from_state(
-            self._match_states.get(device_id, {})
-        )
+        local_result = self.scoring_engine.calculate_from_state(match_state)
 
-        result = {
-            "type": "analysis_result",
-            "score": local_result.get("score", 0),
-            "rating": local_result.get("rating", "D"),
-            "game_state": game_state,
-            "suggestions": local_result.get("suggestions", []),
+        # 按Android端格式发送评分结果
+        score_data = {
+            "matchId": match_id,
+            "totalScore": local_result.get("score", 0),
+            "grade": local_result.get("rating", "D"),
+            "categories": local_result.get("categories", {}),
+            "aiAnalysis": "",
+            "aiAdvice": "",
             "timestamp": int(time.time() * 1000)
         }
+        await self._send_ws(websocket, "score", json.dumps(score_data, ensure_ascii=False), match_id)
 
         # 如果有AI模型且帧变化显著，进行深度分析
         if self.model_manager and self.model_manager.is_ready and frame_b64:
@@ -162,15 +180,12 @@ class GameWSServer:
                 temperature=0.5
             )
             if ai_analysis:
-                result["ai_analysis"] = ai_analysis
+                analysis_data = {"text": ai_analysis}
+                await self._send_ws(websocket, "analysis", json.dumps(analysis_data, ensure_ascii=False), match_id)
 
-        await self._send(websocket, result)
-        # 同时发送语音文本
+        # 同时发送语音文本（TTS）
         if local_result.get("voice_text"):
-            await self._send(websocket, {
-                "type": "tts",
-                "text": local_result["voice_text"]
-            })
+            await self._send_ws(websocket, "tts", local_result["voice_text"], match_id)
 
     async def _handle_game_event(self, device_id: str, websocket, msg: Dict):
         """处理游戏事件"""
@@ -227,8 +242,21 @@ class GameWSServer:
                     "grade": final_score["rating"]
                 }
 
+    async def _send_ws(self, websocket, msg_type: str, payload: str = "", match_id: str = ""):
+        """按Android端WsMessage格式发送消息"""
+        data = {
+            "type": msg_type,
+            "payload": payload,
+            "timestamp": int(time.time() * 1000),
+            "match_id": match_id
+        }
+        try:
+            await websocket.send(json.dumps(data, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"发送消息失败: {e}")
+
     async def _send(self, websocket, data: Dict):
-        """发送JSON消息"""
+        """发送原始JSON消息（向后兼容）"""
         try:
             await websocket.send(json.dumps(data, ensure_ascii=False))
         except Exception as e:

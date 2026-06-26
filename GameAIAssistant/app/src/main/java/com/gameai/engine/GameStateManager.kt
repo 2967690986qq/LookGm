@@ -167,9 +167,10 @@ object GameStateManager {
     fun updateMatchEconomy(totalGold: Int, gameTimeSec: Int = -1) {
         currentMatch?.let { match ->
             if (match.isActive) {
-                // 如果提供了游戏时间（>1分钟），计算每分钟金币
-                val goldPerMin = if (gameTimeSec > 60) {
-                    totalGold * 60 / gameTimeSec
+                // 优先使用传入的游戏时间，其次使用 match 中已存储的游戏时间
+                val effectiveTimeSec = if (gameTimeSec > 0) gameTimeSec else match.gameTimeSec
+                val goldPerMin = if (effectiveTimeSec > 60) {
+                    totalGold * 60 / effectiveTimeSec
                 } else {
                     totalGold
                 }

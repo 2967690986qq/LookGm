@@ -186,16 +186,17 @@ class ScoringEngine {
 
         when {
             vision >= 80 -> { score = 14; detail.append("视野控制极佳(得分$vision)") }
-            vision >= 50 -> { score = 10 + (vision - 50) / 30 * 4; detail.append("视野优秀(得分$vision)") }
-            vision >= 30 -> { score = 6 + (vision - 30) / 20 * 4; detail.append("视野良好(得分$vision)") }
-            vision >= 10 -> { score = 2 + (vision - 10) / 20 * 4; detail.append("视野一般(得分$vision)") }
+            vision >= 50 -> { score = 10 + ((vision - 50).toFloat() / 30f * 4f).toInt(); detail.append("视野优秀(得分$vision)") }
+            vision >= 30 -> { score = 6 + ((vision - 30).toFloat() / 20f * 4f).toInt(); detail.append("视野良好(得分$vision)") }
+            vision >= 10 -> { score = 2 + ((vision - 10).toFloat() / 20f * 4f).toInt(); detail.append("视野一般(得分$vision)") }
             else -> { score = 1; detail.append("视野不足(得分$vision)，多插眼") }
         }
 
         val supportBonus = if (match.position == GameConstants.GamePosition.SUPPORT) 1 else 0
         val jungleBonus = if (match.position == GameConstants.GamePosition.JUNGLE) 1 else 0
+        val finalScore = (score + supportBonus + jungleBonus).coerceIn(0, 15)
 
-        return ScoreResult.CategoryScore("视野", (score + supportBonus + jungleBonus).coerceIn(0, 15), 15, gradeFor(score, 15), detail.toString())
+        return ScoreResult.CategoryScore("视野", finalScore, 15, gradeFor(finalScore, 15), detail.toString())
     }
 
     // ===== 输出评分 (10分) =====

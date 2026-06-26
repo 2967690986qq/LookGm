@@ -37,7 +37,7 @@ class MatchStateMachine {
                 currentMatch?.let {
                     it.isActive = false
                     it.endTime = System.currentTimeMillis()
-                    matchEventListeners.forEach { _ -> "match_ended" }
+                    matchEventListeners.forEach { it("match_ended") }
                 }
             }
             GameConstants.MatchPhase.LOBBY -> {

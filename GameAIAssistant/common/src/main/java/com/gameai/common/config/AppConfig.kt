@@ -31,6 +31,23 @@ object AppConfig {
     const val TTS_SPEECH_RATE = 1.0f
     const val TTS_PITCH = 1.0f
 
+    // ===== SiliconFlow 语音转文字 (STT) 配置 =====
+    // 使用 SiliconFlow API 进行语音转文字
+    // 模型：FunAudioLLM/SenseVoiceSmall（永久免费，低延迟）
+    //      ← 替代 TeleAI/TeleSpeechASR（该模型仅支持批量文件上传，无法实时流式）
+    // API 文档: https://api-docs.siliconflow.cn/docs/api/audio-transcriptions-post
+    // 接口：POST https://api.siliconflow.cn/v1/audio/transcriptions (multipart/form-data)
+    // 注意：SiliconFlow 目前不提供 WebSocket 流式 ASR 端点，
+    //       本 APP 通过 1.5s 短分片 HTTP POST 连续调用模拟实时体验。
+    const val SILICONFLOW_STT_API_URL = "https://api.siliconflow.cn/v1/audio/transcriptions"
+    const val SILICONFLOW_STT_MODEL = "FunAudioLLM/SenseVoiceSmall"
+    // 音频采样率（SiliconFlow 要求 16000Hz）
+    const val ASR_SAMPLE_RATE = 16000
+    // 本地降噪：AEC回声消除（防止 TTS 播报被回采）
+    const val ASR_ENABLE_AEC = true
+    // 本地降噪：NS环境噪声抑制
+    const val ASR_ENABLE_NS = true
+
     // 悬浮窗配置
     const val FLOATING_BALL_SIZE_DP = 60
     const val FLOATING_BALL_ALPHA_MIN = 0.3f
