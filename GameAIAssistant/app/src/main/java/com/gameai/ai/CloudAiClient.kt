@@ -556,11 +556,14 @@ object CloudAiClient {
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
-    /** 标准化 API 地址：去掉尾部斜杠和 /v1 */
+    /** 标准化 API 地址：去掉尾部斜杠，智能处理版本路径 */
     private fun normalizeApiUrl(url: String): String {
-        return url.trimEnd('/').let {
-            // 部分供应商已在 baseUrl 中包含 /v1
-            if (it.endsWith("/v1")) it.removeSuffix("/v1") else it
-        }.let { it + "/v1" }
+        val trimmed = url.trimEnd('/')
+        // 如果 URL 已经包含版本路径段 (如 /v1, /v4, /v1beta 等)，直接使用
+        if (trimmed.matches(Regex(".*/v\\d+.*$")) || trimmed.endsWith("/v1beta")) {
+            return trimmed
+        }
+        // 否则默认追加 OpenAI 兼容的 /v1 路径
+        return "$trimmed/v1"
     }
 }
