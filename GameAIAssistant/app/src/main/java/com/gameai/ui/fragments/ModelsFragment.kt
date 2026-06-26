@@ -269,7 +269,6 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         binding.tvModelSectionTitle.visibility = View.GONE
         binding.tvFetchStatus.text = ""
         binding.layoutFetchStatus.visibility = View.GONE
-        binding.tvModelStatus.text = ""
 
         renderBoundModels()
     }
@@ -333,13 +332,14 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
                 textSize = 10f
                 background = resources.getDrawable(when (model.usedFor) {
                     "conversation" -> R.drawable.bg_chip_selected
+                    "vision" -> R.drawable.bg_chip_selected
                     "analysis" -> R.drawable.bg_chip_selected
                     "stt" -> R.drawable.bg_chip_selected
                     else -> R.drawable.bg_chip_normal
                 }, null)
                 setTextColor(resources.getColor(
                     when (model.usedFor) {
-                        "conversation", "analysis", "stt" -> R.color.bg_secondary  // 深色字在青色底上
+                        "conversation", "vision", "analysis", "stt" -> R.color.bg_secondary  // 深色字在青色底上
                         else -> R.color.text_primary  // 亮色字在深色底上
                     }, null))
                 setPadding(6, 2, 6, 2)
@@ -403,8 +403,8 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         val spinnerUsedFor = dialogView.findViewById<Spinner>(R.id.spinner_used_for)
         val tvClassifyHint = dialogView.findViewById<TextView>(R.id.tv_classify_hint)
 
-        val usedForOptions = arrayOf("conversation（语音对话）", "analysis（画面分析）", "stt（语音转文字）", "all（通用）")
-        val usedForValues = arrayOf("conversation", "analysis", "stt", "all")
+        val usedForOptions = arrayOf("conversation（语音对话）", "vision（视觉模型）", "analysis（画面分析）", "stt（语音转文字）", "all（通用）")
+        val usedForValues = arrayOf("conversation", "vision", "analysis", "stt", "all")
         val spinnerAdapter = ArrayAdapter(requireContext(), R.layout.item_spinner_selected, usedForOptions)
         spinnerAdapter.setDropDownViewResource(R.layout.item_spinner_dropdown)
         spinnerUsedFor.adapter = spinnerAdapter
@@ -541,8 +541,6 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
     private fun setupListeners() {
         binding.btnFetchModels.setOnClickListener { fetchModelList() }
         binding.btnAddModel.setOnClickListener { showModelDialog() }
-        binding.btnTestModel.setOnClickListener { testConnection() }
-        binding.btnSaveConfig.setOnClickListener { saveConfig() }
         binding.hsProviderChips.setOnTouchListener { _, _ ->
             pauseCarouselTemporarily()
             false
@@ -675,34 +673,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         return models
     }
 
-    // ===== 测试连接 =====
-
-    private fun testConnection() {
-        val apiKey = binding.etApiKey.text.toString().trim()
-        val baseUrl = binding.etBaseUrl.text.toString().trim()
-        if (baseUrl.isEmpty()) {
-            Toast.makeText(requireContext(), "请填写接口地址", Toast.LENGTH_SHORT).show(); return
-        }
-        binding.tvModelStatus.text = "测试中..."
-        binding.tvModelStatus.setTextColor(resources.getColor(R.color.text_secondary, null))
-
-        lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                val tester = ModelConnectionTester()
-                tester.testOpenAICompatible(baseUrl.trimEnd('/'), apiKey)
-            }
-            if (result.success) {
-                binding.tvModelStatus.text = "✓ 连接成功 (${result.latencyMs}ms)"
-                binding.tvModelStatus.setTextColor(resources.getColor(R.color.status_success, null))
-                if (result.availableModels.isNotEmpty()) renderModelList(result.availableModels)
-            } else {
-                binding.tvModelStatus.text = "✗ 连接失败: ${result.message}"
-                binding.tvModelStatus.setTextColor(resources.getColor(R.color.status_error, null))
-            }
-        }
-    }
-
-    // ===== 保存配置 =====
+    // ===== 自动保存配置 =====
 
     /**
      * 自动保存当前供应商的模型配置（添加/编辑模型后自动调用）
@@ -747,41 +718,6 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
 
         refreshAllChipStyles()
         refreshConfiguredProvidersOverview()
-    }
-
-    private fun saveConfig() {
-        val apiKey = binding.etApiKey.text.toString().trim()
-        val baseUrl = binding.etBaseUrl.text.toString().trim()
-
-        if (currentModels.isEmpty()) {
-            Toast.makeText(requireContext(), "请至少添加一个模型（获取列表或手动添加）", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        // 检查模型用途覆盖
-        val hasConversation = currentModels.any { it.matches("conversation") || it.matches("all") }
-        val hasAnalysis = currentModels.any { it.matches("analysis") || it.matches("all") }
-        val hasStt = currentModels.any { it.matches("stt") }
-
-        val warnings = mutableListOf<String>()
-        if (!hasConversation) warnings.add("未绑定\"语音对话\"用途的模型，语音对话功能将不可用")
-        if (!hasAnalysis) warnings.add("未绑定\"画面分析\"用途的模型，画面分析将使用对话模型代替")
-        if (!hasStt && currentProvider.defaultSttModel.isBlank()) {
-            warnings.add("当前供应商不支持语音转文字且未绑定STT模型，语音对话将无法使用")
-        }
-
-        // 使用自动保存方法
-        autoSaveProviderModels()
-
-        refreshAllChipStyles()
-        refreshConfiguredProvidersOverview()
-
-        val savedMsg = "✓ ${currentProvider.displayName} 已保存 ${currentModels.size} 个模型"
-        if (warnings.isNotEmpty()) {
-            Toast.makeText(requireContext(), "$savedMsg\n⚠️ ${warnings.first()}", Toast.LENGTH_LONG).show()
-        } else {
-            Toast.makeText(requireContext(), savedMsg, Toast.LENGTH_SHORT).show()
-        }
     }
 
     // ===== 已配置供应商概览 =====
@@ -845,6 +781,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
 
     private fun usedForLabel(usedFor: String): String = when (usedFor) {
         "conversation" -> "\u8bed\u97f3\u5bf9\u8bdd"
+        "vision" -> "\u89c6\u89c9\u6a21\u578b"
         "analysis" -> "\u753b\u9762\u5206\u6790"
         "stt" -> "\u8bed\u97f3\u8f6c\u6587\u5b57"
         else -> "\u901a\u7528"

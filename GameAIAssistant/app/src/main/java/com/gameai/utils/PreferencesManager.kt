@@ -112,6 +112,63 @@ class PreferencesManager(context: Context) {
         return baseConfig.forPurpose("analysis")
     }
 
+    /** 构建视觉模型配置：优先从当前ProviderConfig.models中选vision标签，其次analysis，最后all */
+    fun getVisionModelConfig(): ProviderConfig? {
+        android.util.Log.d("Preferences", "🔍 开始搜索视觉模型配置")
+
+        // 1. 先检查当前供应商
+        val currentConfig = getCurrentProviderConfig()
+        val visionFromCurrent = pickVisionFromProvider(currentConfig)
+        android.util.Log.d("Preferences", "当前供应商 ${currentConfig.provider.displayName}: visionFromCurrent=${visionFromCurrent != null}")
+        if (visionFromCurrent != null) {
+            android.util.Log.d("Preferences", "✅ 在当前供应商找到视觉模型: ${visionFromCurrent.modelName}")
+            return visionFromCurrent
+        }
+
+        // 2. 跨所有已配置的云供应商搜索
+        val allConfigs = loadConfig().cloudProviderConfigs
+        android.util.Log.d("Preferences", "🔍 跨供应商搜索，共 ${allConfigs.size} 个供应商")
+        for ((name, config) in allConfigs) {
+            if (name == getCurrentProvider().name) continue
+            val visionConfig = pickVisionFromProvider(config)
+            android.util.Log.d("Preferences", "供应商 $name: visionConfig=${visionConfig != null}")
+            if (visionConfig != null) {
+                android.util.Log.d("Preferences", "✅ 在供应商 $name 找到视觉模型: ${visionConfig.modelName}")
+                return visionConfig
+            }
+        }
+
+        // 3. 所有供应商都没有视觉模型
+        android.util.Log.w("Preferences", "❌ 未找到任何视觉模型配置")
+        return null
+    }
+
+    /** 从单个供应商配置中提取视觉模型 */
+    private fun pickVisionFromProvider(config: ProviderConfig): ProviderConfig? {
+        android.util.Log.d("Preferences", "📋 检查供应商: ${config.provider.displayName}, apiKey=${if (config.apiKey.isNotBlank()) "有" else "无"}, models.size=${config.models.size}")
+
+        if (config.apiKey.isBlank()) {
+            android.util.Log.d("Preferences", "   → API Key为空，跳过")
+            return null
+        }
+        if (config.models.isEmpty()) {
+            val defaultVision = config.provider.defaultVisionModel
+            android.util.Log.d("Preferences", "   → 无模型绑定，defaultVisionModel=$defaultVision")
+            return if (defaultVision.isNotBlank())
+                config.copy(modelName = defaultVision)
+            else null
+        }
+        android.util.Log.d("Preferences", "   → 模型列表: ${config.models.map { "${it.modelName}(${it.usedFor})" }}")
+
+        val visionBinding = config.models.firstOrNull { it.matches("vision") }
+            ?: config.models.firstOrNull { it.matches("analysis") }
+            ?: config.models.firstOrNull { it.matches("all") && config.provider.defaultVisionModel.isNotBlank() }
+        android.util.Log.d("Preferences", "   → 匹配结果: ${visionBinding?.modelName}")
+        return if (visionBinding != null)
+            config.copy(modelName = visionBinding.modelName)
+        else null
+    }
+
     /** 获取语音转文字模型配置 — 跨所有云供应商搜索 STT 模型 */
     fun getSttModelConfig(): ProviderConfig? {
         // 1. 先检查当前供应商

@@ -16,9 +16,9 @@ object ModelClassifier {
             if (name.contains(keyword)) return "stt"
         }
 
-        // ===== 多模态 / 视觉模型（可以看图片做分析）=====
+        // ===== 视觉/OCR 模型（专用于图片理解/文字识别）=====
         for (keyword in VISION_KEYWORDS) {
-            if (name.contains(keyword)) return "analysis"
+            if (name.contains(keyword)) return "vision"
         }
 
         // ===== 纯对话模型 =====
@@ -28,6 +28,7 @@ object ModelClassifier {
     /** 返回人类可读的标签 */
     fun classifyLabel(modelName: String): String = when (classify(modelName)) {
         "stt" -> "\uD83C\uDF99\uFE0F 语音识别"
+        "vision" -> "\uD83D\uDC41\uFE0F 视觉模型"
         "analysis" -> "\uD83D\uDD2C 多模态分析"
         "conversation" -> "\uD83D\uDCAC 对话"
         else -> "\uD83D\uDCAC 通用"
@@ -40,7 +41,7 @@ object ModelClassifier {
             if (name.contains(keyword)) return "\"$keyword\" → 语音转文字模型"
         }
         for (keyword in VISION_KEYWORDS) {
-            if (name.contains(keyword)) return "\"$keyword\" → 多模态/视觉模型"
+            if (name.contains(keyword)) return "\"$keyword\" → 视觉/OCR模型"
         }
         return "默认 → 对话模型"
     }
@@ -75,6 +76,8 @@ object ModelClassifier {
         "cogvlm",
         "llava",
         "visual",
-        "video"
+        "video",
+        "ocr",       // OCR 模型
+        "deepseek-ocr" // DeepSeek OCR
     )
 }

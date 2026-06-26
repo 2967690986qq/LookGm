@@ -35,6 +35,7 @@ enum class ModelProvider(
     val defaultBaseUrl: String,
     val defaultModel: String,
     val defaultSttModel: String = "",   // 默认语音转文字模型（空=不支持STT）
+    val defaultVisionModel: String = "", // 默认视觉模型（空=不支持视觉）
     val isLocal: Boolean = false,
     val description: String = "",
     val icon: String = ""
@@ -45,6 +46,7 @@ enum class ModelProvider(
         defaultBaseUrl = "https://api.openai.com/v1",
         defaultModel = "gpt-4o",
         defaultSttModel = "whisper-1",
+        defaultVisionModel = "gpt-4o",
         description = "GPT-4o/GPT-4o-mini 等",
         icon = "\uD83E\uDD16"
     ),
@@ -52,27 +54,31 @@ enum class ModelProvider(
         displayName = "DeepSeek",
         defaultBaseUrl = "https://api.deepseek.com/v1",
         defaultModel = "deepseek-chat",
-        description = "DeepSeek-V3/R1 等",
+        defaultVisionModel = "deepseek-vl",
+        description = "DeepSeek-V3/R1/VL 等",
         icon = "\uD83D\uDC0B"
     ),
     QWEN(
         displayName = "通义千问",
         defaultBaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1",
         defaultModel = "qwen-max",
-        description = "Qwen-Max/Plus/Turbo 等",
+        defaultVisionModel = "qwen-vl-max",
+        description = "Qwen-Max/Plus/Turbo/VL 等",
         icon = "\u2601\uFE0F"
     ),
     ERNIE(
         displayName = "文心一言",
         defaultBaseUrl = "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat",
         defaultModel = "ernie-4.0-8k",
-        description = "ERNIE 4.0/3.5 等",
+        defaultVisionModel = "ernie-4.0-vision",
+        description = "ERNIE 4.0/3.5/Vision 等",
         icon = "\uD83D\uDCD8"
     ),
     ZHIPU(
         displayName = "智谱AI",
         defaultBaseUrl = "https://open.bigmodel.cn/api/paas/v4",
         defaultModel = "glm-4-plus",
+        defaultVisionModel = "glm-4v",
         description = "GLM-4/GLM-4V 等",
         icon = "\uD83D\uDC8E"
     ),
@@ -81,6 +87,7 @@ enum class ModelProvider(
         defaultBaseUrl = "https://api.siliconflow.cn/v1",
         defaultModel = "Qwen/Qwen2.5-7B-Instruct",
         defaultSttModel = "FunAudioLLM/SenseVoiceSmall",
+        defaultVisionModel = "deepseek-ai/DeepSeek-OCR",
         description = "免费语音模型+多模态推理",
         icon = "\uD83C\uDF0A"
     ),
@@ -90,6 +97,7 @@ enum class ModelProvider(
         displayName = "Ollama",
         defaultBaseUrl = "http://192.168.1.100:11434/v1",
         defaultModel = "qwen2.5:7b",
+        defaultVisionModel = "qwen2.5-vl:7b",
         isLocal = true,
         description = "Ollama本地部署",
         icon = "\uD83E\uDD99"
@@ -98,6 +106,7 @@ enum class ModelProvider(
         displayName = "vLLM",
         defaultBaseUrl = "http://192.168.1.100:8000/v1",
         defaultModel = "Qwen2.5-VL-7B-Instruct",
+        defaultVisionModel = "Qwen2.5-VL-7B-Instruct",
         isLocal = true,
         description = "vLLM高性能推理",
         icon = "\u26A1"
@@ -151,13 +160,20 @@ data class ProviderConfig(
                 ?: models.firstOrNull { it.matches("all") }?.modelName
                 ?: modelName
         }
-        // 3. "all" 作为通用兜底
+        // 3. vision 视觉模型：优先用 vision，其次用 analysis，最后用 all
+        if (usedFor == "vision") {
+            return models.firstOrNull { it.usedFor == "analysis" }?.modelName
+                ?: models.firstOrNull { it.matches("all") }?.modelName
+                ?: modelName
+        }
+        // 4. "all" 作为通用兜底
         return models.firstOrNull { it.matches("all") }?.modelName ?: modelName
     }
 
     fun getConversationModel(): String = getModelFor("conversation")
     fun getAnalysisModel(): String = getModelFor("analysis")
     fun getSttModel(): String = getModelFor("stt")
+    fun getVisionModel(): String = getModelFor("vision")
 
     /** 根据用途获取完整ProviderConfig（模型名被替换） */
     fun forPurpose(usedFor: String): ProviderConfig =

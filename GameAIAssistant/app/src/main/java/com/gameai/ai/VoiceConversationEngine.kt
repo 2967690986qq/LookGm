@@ -55,6 +55,7 @@ object VoiceConversationEngine {
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var appContext: Context? = null
     private var idleTimer: Handler? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var isActive = false
 
     // 打断机制
@@ -74,6 +75,10 @@ object VoiceConversationEngine {
 
     // 最新屏幕截图
     @Volatile var latestBitmap: Bitmap? = null
+
+    // 状态持久化 key
+    private const val PREFS_VOICE_STATE = "voice_conversation_state"
+    private const val KEY_IS_ACTIVE = "is_active"
 
     // ============================================================
     //  广播常量
@@ -111,7 +116,7 @@ object VoiceConversationEngine {
                     transitionState(State.IDLE)
                     Handler(Looper.getMainLooper()).postDelayed({
                         if (isActive && !isListeningPaused) startListening()
-                    }, 300)  // 短暂停顿让 AEC 缓冲清空
+                    }, 150)  // 缩短延迟到 150ms，让对话更流畅（AEC 缓冲有 400ms 预热期保护）
                 } else if (isListeningPaused) {
                     transitionState(State.IDLE)
                     broadcastMessage("system", "聆听已暂停，说\"继续听\"恢复")
@@ -162,6 +167,9 @@ object VoiceConversationEngine {
         currentCommand = null
         transitionState(State.IDLE)
 
+        // 保存状态：语音对话已激活（用于后台恢复）
+        saveConversationState(true)
+
         // 初始化指令处理器上下文
         VoiceCommandHandler.setConversationActive(true)
 
@@ -208,10 +216,32 @@ object VoiceConversationEngine {
         transitionState(State.IDLE)
         cancelIdleTimer()
 
+        // 5. 完全停止语音服务（释放 WakeLock、停止前台服务）
+        appContext?.let { VoiceService.stopVoiceConversation(it) }
+
+        // 清除保存的状态
+        saveConversationState(false)
+
         android.util.Log.i(TAG, "stopConversation() 完成 — 麦克风已永久释放")
     }
 
     fun isConversationActive(): Boolean = isActive
+
+    /**
+     * 检查是否有未完成的语音对话需要恢复
+     * 用于服务重启或应用从后台恢复时
+     */
+    fun hasSavedConversation(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_VOICE_STATE, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_IS_ACTIVE, false)
+    }
+
+    /** 保存语音对话状态（用于后台恢复） */
+    private fun saveConversationState(active: Boolean) {
+        val ctx = appContext ?: return
+        val prefs = ctx.getSharedPreferences(PREFS_VOICE_STATE, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_IS_ACTIVE, active).apply()
+    }
 
     // ============================================================
     //  打断逻辑
@@ -259,20 +289,31 @@ object VoiceConversationEngine {
         transitionState(State.LISTENING)
 
         // STT 成功 → 先检查语音指令，再交给 AI 处理
-        val sttOnResult: (String) -> Unit = { text ->
-            onUserSpeech?.invoke(text)
-            broadcastMessage("user", text)
-            onMessageReceived?.invoke(ChatMessage("user", text))
+        val sttOnResult: (String) -> Unit = sttOnResult@{ text ->
             VoiceService.stopListening()
 
+            val trimmed = text.trim()
+            if (trimmed.isEmpty()) {
+                // 识别结果为空，静默重新监听
+                if (isActive && state == State.LISTENING) {
+                    startListening()
+                }
+                return@sttOnResult
+            }
+
+            // 一次识别结果作为一条完整的用户消息
+            onUserSpeech?.invoke(trimmed)
+            broadcastMessage("user", trimmed)
+            onMessageReceived?.invoke(ChatMessage("user", trimmed))
+
             // v3.0: 尝试解析语音指令（优先级高于 AI 对话）
-            val cmd = VoiceCommandHandler.tryParseCommand(text)
+            val cmd = VoiceCommandHandler.tryParseCommand(trimmed)
             if (cmd != null) {
                 handleVoiceCommand(cmd)
                 // 指令已处理，不再走 AI 对话流程
             } else {
                 // 如果之前在暂停聆听状态，用户说任何话都自动恢复
-                if (isListeningPaused && !isCommandText(text)) {
+                if (isListeningPaused && !isCommandText(trimmed)) {
                     isListeningPaused = false
                     broadcastMessage("system", "聆听已恢复")
                 }
@@ -284,20 +325,18 @@ object VoiceConversationEngine {
                 }
 
                 transitionState(State.PROCESSING)
-                processUserInputStreaming(text)
+                processUserInputStreaming(trimmed)
             }
         }
 
         val sttOnError: (String) -> Unit = { error ->
             android.util.Log.w(TAG, "STT 错误: $error")
             VoiceService.stopListening()
-            Handler(Looper.getMainLooper()).post {
-                Toast.makeText(ctx, error, Toast.LENGTH_SHORT).show()
-            }
+            // 静默处理错误，不打扰用户，自动重试
             if (isActive && state == State.LISTENING) {
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (isActive) startListening()
-                }, 1500)
+                }, 800)
             }
         }
 
@@ -368,7 +407,7 @@ object VoiceConversationEngine {
             // 打断后立即开始新一轮聆听（用户的打断语音本身会被捕获）
             Handler(Looper.getMainLooper()).postDelayed({
                 if (isActive && !isListeningPaused) startListening()
-            }, 50)  // 仅 50ms，录音器预热期（400ms）会处理 AEC 稳定
+            }, 30)  // 极短延迟，加快打断响应速度（录音器预热期会保护 AEC 稳定）
         }
     }
 
@@ -382,9 +421,12 @@ object VoiceConversationEngine {
 
     private fun processUserInputStreaming(text: String) {
         val bitmap = latestBitmap
-        val config = getConversationConfig()
+        val visionConfig = getVisionConfig()
+        val conversationConfig = getConversationConfig()
+        val isScreenCaptureRunning = com.gameai.service.ScreenCaptureService.isRunning
+        val hasScreenshotReady = com.gameai.service.ScreenCaptureService.hasScreenshot
 
-        if (config == null) {
+        if (conversationConfig == null) {
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(appContext, "未配置对话模型", Toast.LENGTH_LONG).show()
             }
@@ -392,13 +434,83 @@ object VoiceConversationEngine {
             return
         }
 
+        android.util.Log.d(TAG, "📸 截图状态: bitmap=${bitmap != null}, " +
+                "录屏运行=$isScreenCaptureRunning, " +
+                "截图就绪=$hasScreenshotReady, " +
+                "视觉模型=${visionConfig != null}")
+
+        when {
+            // 情况1：有截图 + 有视觉模型 → 先OCR识别屏幕，再用对话模型回复
+            bitmap != null && visionConfig != null -> {
+                android.util.Log.d(TAG, "📸 检测到屏幕截图，先进行OCR识别")
+                CoroutineScope(Dispatchers.IO).launch {
+                    val ocrResult = CloudAiClient.ocrRecognize(bitmap, visionConfig)
+                    if (ocrResult != null && ocrResult.isNotBlank()) {
+                        android.util.Log.d(TAG, "📷 OCR识别成功，长度: ${ocrResult.length}")
+                        broadcastScreenOcrResult(ocrResult)
+                        val enhancedMessage = buildString {
+                            append("【当前屏幕内容】\n")
+                            append(ocrResult)
+                            append("\n\n【用户语音】\n")
+                            append(text)
+                        }
+                        startStreamingConversation(null, conversationConfig, enhancedMessage)
+                    } else {
+                        android.util.Log.w(TAG, "OCR识别失败，直接传图给对话模型")
+                        startStreamingConversation(bitmap, conversationConfig, text)
+                    }
+                }
+            }
+            // 情况2：有截图 + 无视觉模型 → 直接把截图传给对话模型
+            bitmap != null && visionConfig == null -> {
+                android.util.Log.d(TAG, "📸 有截图但无专门视觉模型，直接传图给对话模型")
+                startStreamingConversation(bitmap, conversationConfig, text)
+            }
+            // 情况3：录屏在运行但暂无截图（第一帧还没捕获）
+            bitmap == null && isScreenCaptureRunning && !hasScreenshotReady -> {
+                android.util.Log.w(TAG, "录屏正在运行但第一帧还未捕获，稍等后重试")
+                handleAssistantReplyFallback("正在获取屏幕画面，请稍候再试")
+            }
+            // 情况4：录屏已就绪但截图暂时为null（可能正在处理中）
+            bitmap == null && isScreenCaptureRunning && hasScreenshotReady -> {
+                android.util.Log.d(TAG, "录屏已就绪，暂时无截图，进行正常对话")
+                startStreamingConversation(null, conversationConfig, text)
+            }
+            // 情况5：无截图 + 录屏没运行 → 正常对话
+            else -> {
+                startStreamingConversation(null, conversationConfig, text)
+            }
+        }
+    }
+
+    /**
+     * 广播屏幕OCR识别结果，供UI层展示
+     */
+    private fun broadcastScreenOcrResult(ocrText: String) {
+        val ctx = appContext ?: return
+        val intent = android.content.Intent(ACTION_VOICE_MESSAGE).apply {
+            putExtra(EXTRA_ROLE, "screen_ocr")
+            putExtra(EXTRA_TEXT, ocrText)
+            putExtra(EXTRA_TIMESTAMP, System.currentTimeMillis())
+        }
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(ctx).sendBroadcast(intent)
+    }
+
+    /**
+     * 开始流式对话
+     */
+    private fun startStreamingConversation(
+        bitmap: android.graphics.Bitmap?,
+        config: com.gameai.model.ProviderConfig,
+        message: String
+    ) {
         spokenSentenceCount = 0
         val accTextRef = StringBuilder()
 
         currentStreamingCall = CloudAiClient.converseStreaming(
             bitmap = bitmap,
             config = config,
-            userMessage = text,
+            userMessage = message,
             onToken = { accumulatedText ->
                 accTextRef.clear()
                 accTextRef.append(accumulatedText)
@@ -431,7 +543,7 @@ object VoiceConversationEngine {
                 currentStreamingCall = null
 
                 // 保存对话上下文到记忆系统
-                MemoryManager.saveContext("last_user_msg", text.take(200))
+                MemoryManager.saveContext("last_user_msg", message.take(200))
                 MemoryManager.saveContext("last_assistant_msg", fullText.take(200))
 
                 // 流结束 → 处理最终结果
@@ -571,7 +683,7 @@ object VoiceConversationEngine {
         var lastEnd = 0
         for (i in text.indices) {
             val c = text[i]
-            if (c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '\n') {
+            if (isSentenceEndChar(c)) {
                 val seg = text.substring(lastEnd, i).trim()
                 if (seg.isNotEmpty()) {
                     count++
@@ -582,13 +694,84 @@ object VoiceConversationEngine {
         return count
     }
 
-    /** 按句子切分文本 */
+    /** 判断是否为句子结束符 */
+    private fun isSentenceEndChar(c: Char): Boolean {
+        return when (c) {
+            '。', '！', '？', '!', '?', '\n', '；', ';', '…', '—' -> true
+            else -> false
+        }
+    }
+
+    /**
+     * 按句子切分文本
+     * 支持中英文标点、省略号、分号等句子结束符
+     * 每句保留结束标点，确保语义完整
+     */
     private fun splitSentences(text: String): List<String> {
         val result = mutableListOf<String>()
         val sb = StringBuilder()
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            sb.append(c)
+
+            // 处理省略号等多字符结束符
+            if (c == '…' && i + 1 < text.length && text[i + 1] == '…') {
+                sb.append(text[i + 1])
+                i++
+            }
+
+            if (isSentenceEndChar(c)) {
+                val s = sb.toString().trim()
+                if (s.isNotEmpty()) {
+                    result.add(s)
+                }
+                sb.clear()
+            }
+            i++
+        }
+        val remaining = sb.toString().trim()
+        if (remaining.isNotEmpty()) {
+            result.add(remaining)
+        }
+        return result
+    }
+
+    /**
+     * 智能分句：将长文本拆分为语义完整的句子
+     * 优先按标点符号分割，其次按语义长度分割
+     */
+    private fun smartSplitSentences(text: String): List<String> {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return emptyList()
+
+        // 先按标点分割
+        val byPunctuation = splitSentences(trimmed)
+        val result = mutableListOf<String>()
+
+        for (sentence in byPunctuation) {
+            // 对于超长句子（>50字），尝试按逗号、顿号进一步分割
+            if (sentence.length > 50) {
+                val subSentences = splitByComma(sentence)
+                result.addAll(subSentences)
+            } else {
+                result.add(sentence)
+            }
+        }
+
+        return result
+    }
+
+    /** 按逗号、顿号分割长句 */
+    private fun splitByComma(text: String): List<String> {
+        val result = mutableListOf<String>()
+        val sb = StringBuilder()
+
         for (c in text) {
             sb.append(c)
-            if (c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '\n') {
+
+            // 在逗号、顿号处分割，但确保每段至少有15个字
+            if ((c == '，' || c == ',' || c == '、') && sb.length >= 15) {
                 val s = sb.toString().trim()
                 if (s.isNotEmpty()) {
                     result.add(s)
@@ -596,10 +779,19 @@ object VoiceConversationEngine {
                 sb.clear()
             }
         }
+
         val remaining = sb.toString().trim()
         if (remaining.isNotEmpty()) {
             result.add(remaining)
         }
+
+        // 如果分割后最后一段太短（<5字），合并到前一段
+        if (result.size >= 2 && result.last().length < 5) {
+            val last = result.removeAt(result.size - 1)
+            val prev = result.removeAt(result.size - 1)
+            result.add(prev + last)
+        }
+
         return result
     }
 
@@ -715,6 +907,32 @@ object VoiceConversationEngine {
             return null
         }
         return config
+    }
+
+    /**
+     * 获取视觉模型配置
+     * 优先级：专门的 vision 模型 > analysis 模型 > all 模型 > 当前对话模型
+     */
+    private fun getVisionConfig(): ProviderConfig? {
+        val ctx = appContext ?: return null
+        val prefs = PreferencesManager.getInstance(ctx)
+        val config = prefs.getVisionModelConfig() ?: prefs.getCurrentProviderConfig()
+
+        if (prefs.getModelMode() == com.gameai.model.ModelMode.CLOUD && config.apiKey.isBlank()) {
+            return null
+        }
+        return config
+    }
+
+    /**
+     * 判断是否有可用的视觉模型配置
+     * 用于决定是否在对话中自动带上屏幕截图
+     * 支持跨所有已配置供应商搜索视觉模型
+     */
+    private fun hasVisionModel(): Boolean {
+        val ctx = appContext ?: return false
+        val prefs = PreferencesManager.getInstance(ctx)
+        return prefs.getVisionModelConfig() != null
     }
 
     private fun getSttConfig(): ProviderConfig? {

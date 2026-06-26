@@ -52,7 +52,18 @@ class ScreenCaptureService : Service() {
         const val EXTRA_SCORE = "score"
         const val EXTRA_GRADE = "grade"
 
+        // 录屏状态广播
+        const val ACTION_CAPTURE_STATUS = "com.gameai.CAPTURE_STATUS"
+        const val EXTRA_CAPTURE_STATUS = "capture_status"
+        const val STATUS_READY = "ready"           // 录屏已准备好，可以截图
+        const val STATUS_FIRST_FRAME = "first_frame"  // 已捕获第一帧
+        const val STATUS_ERROR = "error"            // 录屏出错
+
         var isRunning = false
+            private set
+
+        /** 是否有可用的截图（第一帧已捕获） */
+        var hasScreenshot = false
             private set
 
         fun requestPermission(activity: androidx.fragment.app.FragmentActivity, requestCode: Int) {
@@ -142,6 +153,13 @@ class ScreenCaptureService : Service() {
             gameStateDetector = GameStateDetector()
             textRecognizer = GameTextRecognizer()
             ScreenAnalysisEngine.init(this)
+
+            // 初始化实时视觉分析引擎（使用视觉模型做通用屏幕理解）
+            com.gameai.ai.VisionAnalysisEngine.init(this)
+
+            // 初始化OCR结构化分析引擎
+            com.gameai.ai.ScreenOcrEngine.init(this)
+
             lastDetectedPhase = GameConstants.MatchPhase.LOBBY
             lastPhaseBroadcastTime = 0L
             lastOcrTime = 0L
@@ -149,33 +167,81 @@ class ScreenCaptureService : Service() {
             startNotification()
             startFrameCapture()
             isRunning = true
+            hasScreenshot = false
+
+            // 广播录屏已准备好
+            broadcastStatus(STATUS_READY)
+            android.util.Log.d("ScreenCapture", "✅ 录屏服务已启动，等待第一帧...")
 
             // 连接WebSocket
             WebSocketService.startConnection(this, wsHost, wsPort, gameName)
 
+            // 启动实时视觉分析（如果配置了视觉模型）
+            com.gameai.ai.VisionAnalysisEngine.start(intervalMs = 10000L)
+
+            // 启动OCR结构化分析（如果配置了视觉模型）
+            val prefs = com.gameai.utils.PreferencesManager.getInstance(this)
+            if (prefs.getVisionModelConfig() != null) {
+                com.gameai.ai.ScreenOcrEngine.getInstance().start(intervalMs = 10000L)
+                android.util.Log.d("ScreenCapture", "🚀 OCR结构化分析引擎已启动")
+            } else {
+                android.util.Log.w("ScreenCapture", "⚠️ 未配置视觉模型，跳过OCR分析")
+            }
+
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("ScreenCapture", "❌ 录屏服务启动失败", e)
+            broadcastStatus(STATUS_ERROR, "录屏启动失败: ${e.message}")
             stopSelf()
         }
     }
 
+    private fun broadcastStatus(status: String, message: String? = null) {
+        val intent = android.content.Intent(ACTION_CAPTURE_STATUS).apply {
+            putExtra(EXTRA_CAPTURE_STATUS, status)
+            message?.let { putExtra("error_message", it) }
+        }
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+    }
+
     private fun startFrameCapture() {
         val frameInterval = 1000L / captureFps
+        var firstFrameCaptured = false
+        var frameCount = 0
+
         captureJob = scope.launch {
+            android.util.Log.d("ScreenCapture", "🔄 帧捕获循环已启动，FPS: $captureFps")
             while (isActive && isRunning) {
                 try {
                     val image = imageReader?.acquireLatestImage()
                     if (image != null) {
+                        android.util.Log.d("ScreenCapture", "📷 获取到图像，格式: ${image.format}, 宽度: ${image.width}, 高度: ${image.height}")
                         val bitmap = rgbaImageToBitmap(image)
                         image.close()
 
                         if (bitmap != null) {
+                            android.util.Log.d("ScreenCapture", "🖼️ 图像转换成功，尺寸: ${bitmap.width}x${bitmap.height}, 配置: ${bitmap.config}")
+
                             // 把最新帧喂给语音对话引擎（豆包模式：边看边聊）
                             // 注意：必须 copy 一份，因为当前 bitmap 在本帧结束后会被 recycle
                             val oldBitmap = com.gameai.ai.VoiceConversationEngine.latestBitmap
                             val newBitmap = bitmap.copy(bitmap.config, false)
                             com.gameai.ai.VoiceConversationEngine.latestBitmap = newBitmap
                             oldBitmap?.recycle()
+
+                            android.util.Log.d("ScreenCapture", "✅ latestBitmap已更新，newBitmap不为null: ${newBitmap != null}")
+
+                            // 第一帧捕获成功
+                            if (!firstFrameCaptured) {
+                                firstFrameCaptured = true
+                                hasScreenshot = true
+                                broadcastStatus(STATUS_FIRST_FRAME)
+                                android.util.Log.d("ScreenCapture", "🎉 第一帧已捕获，尺寸: ${newBitmap.width}x${newBitmap.height}")
+                            }
+
+                            frameCount++
+                            if (frameCount % 30 == 0) {
+                                android.util.Log.d("ScreenCapture", "📊 已捕获 $frameCount 帧，latestBitmap: ${com.gameai.ai.VoiceConversationEngine.latestBitmap != null}")
+                            }
 
                             val now = System.currentTimeMillis()
 
@@ -226,6 +292,8 @@ class ScreenCaptureService : Service() {
                             }
 
                             bitmap.recycle()
+                        } else {
+                            android.util.Log.w("ScreenCapture", "⚠️ 图像转换失败，跳过此帧")
                         }
 
                         // 计算FPS
@@ -306,6 +374,7 @@ class ScreenCaptureService : Service() {
 
     private fun stopCapture() {
         isRunning = false
+        hasScreenshot = false
         captureJob?.cancel()
         scope.cancel()
 
@@ -317,6 +386,10 @@ class ScreenCaptureService : Service() {
         com.gameai.ai.VoiceConversationEngine.latestBitmap = null
 
         ScreenAnalysisEngine.release()
+        com.gameai.ai.VisionAnalysisEngine.release()
+
+        // 停止OCR结构化分析引擎
+        com.gameai.ai.ScreenOcrEngine.getOrNull()?.stop()
 
         virtualDisplay?.release()
         virtualDisplay = null

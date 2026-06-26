@@ -83,18 +83,30 @@ class CloudSpeechRecognizer(
         // ===== VAD 语音活动检测参数 =====
         // 用于自动检测用户是否说完话（静音 ~400ms 自动停止并识别）
         // VAD_CHECK_INTERVAL=2 帧 × 64ms ≈ 128ms 间隔，2 次静音 ≈ 256ms 触发结束
-        private const val SPEECH_START_THRESHOLD = 600.0   // 提高阈值，避免扬声器回声误触发
-        private const val SPEECH_END_THRESHOLD = 350.0     // 提高静音阈值，更敏感地检测停顿
+        private const val SPEECH_START_THRESHOLD = 600.0   // 语音开始阈值，避免扬声器回声误触发
+        private const val SPEECH_END_THRESHOLD = 350.0     // 语音结束阈值，检测停顿
         private const val SILENCE_CHUNKS_FOR_END = 2       // 连续 2 个静音帧 ≈ 256ms 后自动结束（加速响应）
         private const val VAD_CHECK_INTERVAL = 2           // 每 2 次音频读取做一次 VAD（128ms）
         private const val MAX_RECORD_DURATION_MS = 15000L  // 最长录音 15 秒（安全保护）
-        private const val BARGE_IN_COOLDOWN_MS = 400L      // 进入监听模式后 400ms 内不触发打断（给 AEC 稳定时间）
-        private const val NORMAL_WARM_UP_MS = 300L         // 正常录音前 300ms 不触发语音检测（AEC 缓冲清空）
+        private const val BARGE_IN_COOLDOWN_MS = 600L      // 进入监听模式后 600ms 内不触发打断（给 AEC 稳定时间）
+        private const val NORMAL_WARM_UP_MS = 400L         // 正常录音前 400ms 不触发语音检测（AEC 缓冲清空）
+
+        // ===== 语音质量过滤参数 =====
+        private const val SPEECH_START_FRAMES_REQUIRED = 3  // 正常模式需要连续 3 帧确认语音开始（防短杂音）
+        private const val MIN_SPEECH_DURATION_MS = 300L     // 最短语音时长 300ms，低于此值视为杂音忽略
+        private const val MIN_RECOGNITION_LENGTH = 2        // 识别结果最少字符数，过短则忽略
+
+        // ===== Monitor 模式（TTS 播报期间）专属参数 =====
+        // TTS 播报时 AEC 可能有残余回声，使用更严格的阈值
+        private const val MONITOR_SPEECH_START_FACTOR = 2.8  // Monitor 模式下语音开始阈值倍率（更高 = 更严格）
+        private const val MONITOR_SPEECH_END_FACTOR = 1.8    // Monitor 模式下语音结束阈值倍率
+        private const val MONITOR_SPEECH_FRAMES_REQUIRED = 8  // Monitor 模式需要连续 8 帧（~1.5s）才确认语音（防回声误触发）
 
         // 自适应噪声底噪估计
         private const val NOISE_FLOOR_WINDOW = 20
-        private const val NOISE_FLOOR_MIN = 80.0           // 噪声底噪最低值（提高避免误触发）
-        private const val ADAPTIVE_FACTOR = 2.2            // 自适应系数（提高，更严格判断语音）
+        private const val NOISE_FLOOR_MIN = 80.0           // 噪声底噪最低值（避免误触发）
+        private const val ADAPTIVE_FACTOR = 2.2            // 自适应系数（正常聆听模式）
+        private const val MONITOR_ADAPTIVE_FACTOR = 3.0    // Monitor 模式自适应系数（更严格）
 
         // ===== SiliconFlow API =====
         // POST https://api.siliconflow.cn/v1/audio/transcriptions (multipart/form-data)
@@ -115,6 +127,7 @@ class CloudSpeechRecognizer(
     @Volatile private var isRecording = false
     @Volatile private var isSpeechActive = false
     private var recordingStartTime = 0L  // 录音开始时间戳，用于预热期判断
+    private var speechStartTime = 0L     // 语音开始时间戳，用于最短语音时长检查
 
     // ===== 打断监听模式（豆包式交互） =====
     // 用于 TTS 播报期间保持麦克风开启，检测用户打断语音
@@ -396,8 +409,9 @@ class CloudSpeechRecognizer(
             if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
                 val sorted = recentNoiseLevels.sorted()
                 estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(NOISE_FLOOR_MIN)
-                adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
-                    .coerceAtLeast(SPEECH_START_THRESHOLD)
+                // Monitor 模式使用更高的自适应系数
+                adaptiveSpeechStart = (estimatedNoiseFloor * MONITOR_ADAPTIVE_FACTOR)
+                    .coerceAtLeast(SPEECH_START_THRESHOLD * MONITOR_SPEECH_START_FACTOR)
             }
             return
         }
@@ -411,16 +425,21 @@ class CloudSpeechRecognizer(
             if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
                 val sorted = recentNoiseLevels.sorted()
                 estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(NOISE_FLOOR_MIN)
-                adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
-                    .coerceAtLeast(SPEECH_START_THRESHOLD)
+                // Monitor 模式使用更高的阈值倍率，防止 TTS 回声误触发
+                adaptiveSpeechStart = (estimatedNoiseFloor * MONITOR_ADAPTIVE_FACTOR)
+                    .coerceAtLeast(SPEECH_START_THRESHOLD * MONITOR_SPEECH_START_FACTOR)
             }
         }
 
-        // 打断检测：检测到持续语音 → 用户正在说话
-        if (rms > adaptiveSpeechStart) {
+        // Monitor 模式下使用更严格的语音确认帧数
+        val monitorThreshold = adaptiveSpeechStart * MONITOR_SPEECH_START_FACTOR / ADAPTIVE_FACTOR
+        val effectiveThreshold = maxOf(monitorThreshold, adaptiveSpeechStart)
+
+        if (rms > effectiveThreshold) {
             speechFrameCount++
-            if (speechFrameCount >= 5) {  // 连续 5 帧（≈ 960ms）确认，防止 AEC 漏过的短回声
-                Log.d(TAG, "🔊 检测到用户打断 (RMS=${rms.toInt()}>阈值=${adaptiveSpeechStart.toInt()})")
+            // Monitor 模式需要更多连续帧确认（防止 AEC 漏过的 TTS 回声短脉冲）
+            if (speechFrameCount >= MONITOR_SPEECH_FRAMES_REQUIRED) {
+                Log.d(TAG, "🔊 检测到用户打断 (RMS=${rms.toInt()}>阈值=${effectiveThreshold.toInt()}, 连续${speechFrameCount}帧)")
                 mainHandler.post {
                     bargeInCallback?.invoke()
                 }
@@ -482,8 +501,9 @@ class CloudSpeechRecognizer(
      * 基于 RMS 的自适应 VAD：
      *   - 自适应估计环境噪声底噪
      *   - 检测语音开始、结束事件
-     *   - 连续静音 ≈ 576ms → 触发 onSpeechEnd + onSilence → 自动开始识别
+     *   - 连续静音 ≈ 256ms → 触发 onSpeechEnd + onSilence → 自动开始识别
      *   - 录音前 NORMAL_WARM_UP_MS 内抑制检测（AEC 缓冲区清空）
+     *   - 最短语音时长检查：太短的声音视为杂音忽略
      */
     private fun checkVad(buffer: ByteArray, length: Int) {
         val rms = calculateRms(buffer, length)
@@ -519,12 +539,13 @@ class CloudSpeechRecognizer(
         }
 
         if (!isSpeechActive) {
-            // 检测语音开始
+            // 检测语音开始：需要连续 SPEECH_START_FRAMES_REQUIRED 帧确认
             if (rms > adaptiveSpeechStart) {
                 speechFrameCount++
-                if (speechFrameCount >= 3) {  // 连续 3 帧确认
+                if (speechFrameCount >= SPEECH_START_FRAMES_REQUIRED) {
                     isSpeechActive = true
                     silenceFrameCount = 0
+                    speechStartTime = System.currentTimeMillis()
                     mainHandler.post {
                         onSpeechBegin()
                         Log.d(TAG, "🎙 语音开始 (RMS=${rms.toInt()}>阈值=${adaptiveSpeechStart.toInt()})")
@@ -538,7 +559,22 @@ class CloudSpeechRecognizer(
             if (rms < adaptiveSpeechEnd) {
                 silenceFrameCount++
                 if (silenceFrameCount >= SILENCE_CHUNKS_FOR_END) {
-                    // 连续静音 ≈ 576ms → 用户说完，自动停止并识别
+                    // 检查最短语音时长：太短视为杂音，不识别，继续监听
+                    val speechDuration = System.currentTimeMillis() - speechStartTime
+                    if (speechDuration < MIN_SPEECH_DURATION_MS) {
+                        Log.d(TAG, "🔇 语音过短 (${speechDuration}ms < ${MIN_SPEECH_DURATION_MS}ms)，视为杂音，继续监听")
+                        // 重置状态，继续监听
+                        isSpeechActive = false
+                        speechFrameCount = 0
+                        silenceFrameCount = 0
+                        // 清空已累积的音频（杂音丢弃）
+                        synchronized(audioLock) {
+                            accumulatedAudio.reset()
+                        }
+                        return
+                    }
+
+                    // 连续静音 → 用户说完，自动停止并识别
                     Log.d(TAG, "🔇 VAD 静音结束 (静音帧=$silenceFrameCount, ≈${silenceFrameCount * VAD_CHECK_INTERVAL * 64}ms)")
                     mainHandler.post {
                         onSpeechEnd()
@@ -624,6 +660,21 @@ class CloudSpeechRecognizer(
 
                 if (text != null && text.isNotBlank()) {
                     val trimmed = text.trim()
+
+                    // 识别结果过滤：太短或无意义的内容忽略，继续监听
+                    if (trimmed.length < MIN_RECOGNITION_LENGTH || isMeaninglessText(trimmed)) {
+                        Log.d(TAG, "识别结果过短或无意义（\"$trimmed\"），静默继续监听")
+                        withContext(Dispatchers.Main) {
+                            releaseHardware()
+                            if (!isPermanentlyStopped) {
+                                mainHandler.postDelayed({
+                                    if (!isPermanentlyStopped) startListening()
+                                }, 300)
+                            }
+                        }
+                        return@launch
+                    }
+
                     failedSttAttempts = 0
                     withContext(Dispatchers.Main) {
                         Log.d(TAG, "✅ 识别完成: $trimmed")
@@ -803,6 +854,32 @@ class CloudSpeechRecognizer(
             sum += (sample.toDouble() * sample.toDouble())
         }
         return Math.sqrt(sum / samples)
+    }
+
+    /**
+     * 判断识别结果是否为无意义文本
+     * 过滤掉：纯标点、只有语气词、只有单个字的杂音等
+     */
+    private fun isMeaninglessText(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return true
+
+        // 移除所有标点和空白
+        val cleanText = trimmed.replace(Regex("[\\p{Punct}\\s]"), "")
+        if (cleanText.isEmpty()) return true
+
+        // 只有单个字（可能是杂音）
+        if (cleanText.length <= 1) return true
+
+        // 常见语气词/无意义词（可能是环境音误识别）
+        val meaninglessWords = setOf(
+            "嗯", "啊", "哦", "呃", "唉", "诶", "唔", "哼", "呀", "哟",
+            "嗯嗯", "啊啊", "哦哦", "哈哈", "呵呵", "嘿嘿", "嘻嘻",
+            "嗯啊", "啊嗯", "哦哦哦", "哈哈哈"
+        )
+        if (meaninglessWords.contains(cleanText)) return true
+
+        return false
     }
 
     // ============================================================

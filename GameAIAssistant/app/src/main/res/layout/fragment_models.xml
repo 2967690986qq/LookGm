@@ -265,47 +265,7 @@
             android:layout_height="wrap_content"
             android:orientation="vertical" />
 
-        <!-- 操作按钮 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="20dp">
-
-            <TextView
-                android:id="@+id/btn_test_model"
-                android:layout_width="0dp"
-                android:layout_height="50dp"
-                android:layout_weight="1"
-                android:background="@drawable/bg_btn_outline"
-                android:gravity="center"
-                android:text="@string/model_test"
-                android:textColor="@color/accent_primary"
-                android:textSize="14sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/btn_save_config"
-                android:layout_width="0dp"
-                android:layout_height="50dp"
-                android:layout_weight="1"
-                android:layout_marginStart="12dp"
-                android:background="@drawable/bg_btn_primary"
-                android:gravity="center"
-                android:text="@string/model_save"
-                android:textColor="@color/bg_primary"
-                android:textSize="14sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-
-        <TextView
-            android:id="@+id/tv_model_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:gravity="center"
-            android:textColor="@color/text_secondary"
-            android:textSize="12sp" />
+        
 
         <!-- ===== 已绑定的供应商概览 ===== -->
         <TextView

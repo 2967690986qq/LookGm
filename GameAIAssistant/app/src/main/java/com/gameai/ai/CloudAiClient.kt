@@ -47,6 +47,48 @@ object CloudAiClient {
     @Volatile var currentHeroName: String = ""
 
     /**
+     * OCR 识别屏幕内容（用视觉模型识别图片中的文字和画面信息）
+     * @param bitmap 当前屏幕截图
+     * @param config 视觉模型配置
+     * @return 识别到的屏幕内容文本，失败返回 null
+     */
+    suspend fun ocrRecognize(bitmap: Bitmap, config: ProviderConfig): String? {
+        return withContext(Dispatchers.IO) {
+            apiLock.lock()
+            val startTime = System.currentTimeMillis()
+            try {
+                val systemPrompt = """
+你是一个屏幕内容识别助手。请仔细识别图片中的所有内容，包括：
+1. 所有可见的文字内容（按钮文字、标题、菜单文字、聊天内容等）
+2. 界面布局和主要元素
+3. 当前页面的类型和状态
+
+请用简洁清晰的语言描述你看到的屏幕内容，按以下格式输出：
+- 页面类型：[这是什么页面/应用]
+- 主要内容：[页面上的主要文字和信息]
+- 关键元素：[重要的按钮、图标、状态指示等]
+""".trimIndent()
+
+                val base64Image = bitmapToBase64(bitmap)
+                val requestBody = buildOcrRequestBody(config.modelName, systemPrompt, base64Image)
+                val response = callApi(config, requestBody)
+                val result = parseResponse(response)
+                val latency = System.currentTimeMillis() - startTime
+                val promptTokens = UsageTracker.estimateTokens(systemPrompt) + 50
+                val completionTokens = UsageTracker.estimateTokens(result ?: "")
+                UsageTracker.record(config.provider.name, config.modelName, "vision", promptTokens, completionTokens, latency)
+                result
+            } catch (e: Exception) {
+                e.printStackTrace()
+                UsageTracker.record(config.provider.name, config.modelName, "vision", 0, 0, 0, false)
+                null
+            } finally {
+                apiLock.unlock()
+            }
+        }
+    }
+
+    /**
      * 同步调用 AI 接口分析游戏画面（在后台线程中调用）
      * @param bitmap 当前屏幕截图
      * @param config 模型配置（apiKey, baseUrl, modelName）
@@ -416,6 +458,41 @@ object CloudAiClient {
     // ============================================================
     //  请求构建
     // ============================================================
+
+    /** 构建 OCR 识别请求体 */
+    private fun buildOcrRequestBody(model: String, systemPrompt: String, base64Image: String): String {
+        val messages = JSONArray()
+
+        messages.put(JSONObject().apply {
+            put("role", "system")
+            put("content", systemPrompt)
+        })
+
+        val userContent = JSONArray()
+        userContent.put(JSONObject().apply {
+            put("type", "image_url")
+            put("image_url", JSONObject().apply {
+                put("url", "data:image/jpeg;base64,$base64Image")
+                put("detail", "auto")
+            })
+        })
+        userContent.put(JSONObject().apply {
+            put("type", "text")
+            put("text", "请识别这张图片的内容")
+        })
+
+        messages.put(JSONObject().apply {
+            put("role", "user")
+            put("content", userContent)
+        })
+
+        return JSONObject().apply {
+            put("model", model)
+            put("messages", messages)
+            put("max_tokens", 500)
+            put("temperature", 0.3)
+        }.toString()
+    }
 
     private fun buildRequestBody(model: String, systemPrompt: String, base64Image: String): String {
         val messages = JSONArray()

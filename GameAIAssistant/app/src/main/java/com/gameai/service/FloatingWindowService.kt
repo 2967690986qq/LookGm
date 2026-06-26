@@ -32,6 +32,7 @@ import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.gameai.R
 import com.gameai.ai.ScreenAnalysisEngine
+import com.gameai.ai.VisionAnalysisEngine
 import com.gameai.ai.VoiceCommandHandler
 import com.gameai.ai.VoiceConversationEngine
 import com.gameai.utils.PreferencesManager
@@ -105,6 +106,7 @@ class FloatingWindowService : Service() {
     private var currentLane = ""
     private var currentHero = ""
     private var currentAnalysis: String? = null
+    private var currentVisionAnalysis: String? = null
 
     // === 分路任务数据 ===
     data class TierTask(val tier: String, val color: Int, val tasks: List<String>)
@@ -322,6 +324,9 @@ class FloatingWindowService : Service() {
         createNotificationChannel()
         startForegroundNotification()
 
+        // ===== 后台状态恢复：如果之前语音对话正在进行，自动恢复 =====
+        checkAndRestoreVoiceConversation()
+
         // 注册评分广播接收器（来自 GameStateManager）
         scoreReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -335,6 +340,11 @@ class FloatingWindowService : Service() {
                     }
                     ACTION_UPDATE_ANALYSIS -> {
                         currentAnalysis = intent.getStringExtra(EXTRA_ANALYSIS)
+                        refreshAiAnalysis()
+                    }
+                    // 视觉分析结果
+                    VisionAnalysisEngine.ACTION_VISION_ANALYSIS -> {
+                        currentVisionAnalysis = intent.getStringExtra(VisionAnalysisEngine.EXTRA_VISION_RESULT)
                         refreshAiAnalysis()
                     }
                     // 语音对话消息 → 更新球内文字
@@ -386,6 +396,7 @@ class FloatingWindowService : Service() {
         val filter = IntentFilter().apply {
             addAction(ACTION_UPDATE_SCORE)
             addAction(ACTION_UPDATE_ANALYSIS)
+            addAction(VisionAnalysisEngine.ACTION_VISION_ANALYSIS)
             addAction(VoiceConversationEngine.ACTION_VOICE_MESSAGE)
             addAction(VoiceConversationEngine.ACTION_VOICE_STATE)
             addAction(VoiceConversationEngine.ACTION_VOICE_RMS)
@@ -927,10 +938,25 @@ class FloatingWindowService : Service() {
 
     private fun refreshAiAnalysis() {
         mainHandler.post {
-            val analysis = currentAnalysis
-            if (analysis != null && analysis.isNotBlank()) {
+            val gameAnalysis = currentAnalysis
+            val visionAnalysis = currentVisionAnalysis
+
+            val hasGameAnalysis = !gameAnalysis.isNullOrBlank()
+            val hasVisionAnalysis = !visionAnalysis.isNullOrBlank()
+
+            if (hasGameAnalysis || hasVisionAnalysis) {
                 cardAiAnalysis?.visibility = View.VISIBLE
-                tvAiAnalysis?.text = "🤖 $analysis"
+                val sb = StringBuilder()
+                if (hasGameAnalysis) {
+                    sb.append("🎮 ").append(gameAnalysis)
+                }
+                if (hasGameAnalysis && hasVisionAnalysis) {
+                    sb.append("\n\n")
+                }
+                if (hasVisionAnalysis) {
+                    sb.append("👁️ ").append(visionAnalysis)
+                }
+                tvAiAnalysis?.text = sb.toString()
             } else {
                 cardAiAnalysis?.visibility = View.GONE
             }
@@ -975,6 +1001,41 @@ class FloatingWindowService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
         startForeground(NOTIFICATION_ID, notification)
+    }
+
+    // =================================================================
+    //  后台状态恢复
+    // =================================================================
+
+    /**
+     * 检查并恢复之前的语音对话状态
+     * 当服务被系统杀死后重启（START_STICKY）或应用从后台恢复时调用
+     */
+    private fun checkAndRestoreVoiceConversation() {
+        // 检查是否有保存的语音对话状态
+        if (VoiceConversationEngine.hasSavedConversation(this)) {
+            android.util.Log.d("FloatingWindow", "检测到未结束的语音对话，正在恢复...")
+
+            // 检查录音权限
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+                android.util.Log.w("FloatingWindow", "恢复语音对话失败：缺少录音权限")
+                return
+            }
+
+            // 延迟一小段时间再恢复，确保服务完全初始化
+            mainHandler.postDelayed({
+                try {
+                    VoiceConversationEngine.init(this)
+                    VoiceConversationEngine.startConversation()
+                    updateVoiceUI()
+                    android.util.Log.d("FloatingWindow", "✓ 语音对话已恢复")
+                } catch (e: Exception) {
+                    android.util.Log.e("FloatingWindow", "恢复语音对话失败", e)
+                }
+            }, 500)
+        }
     }
 
     // =================================================================

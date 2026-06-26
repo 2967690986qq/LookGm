@@ -41,6 +41,7 @@ class ChatFragment : Fragment() {
     private var etInput: EditText? = null
     private var ivSend: ImageView? = null
     private var ivMic: ImageView? = null
+    private var ivScreenshot: ImageView? = null
     private var tvSelectedModel: TextView? = null
     private var llModelSwitcher: LinearLayout? = null
     private var llVoiceStatus: LinearLayout? = null
@@ -92,6 +93,7 @@ class ChatFragment : Fragment() {
         etInput = view.findViewById(R.id.et_input)
         ivSend = view.findViewById(R.id.iv_send)
         ivMic = view.findViewById(R.id.iv_mic)
+        ivScreenshot = view.findViewById(R.id.iv_screenshot)
         tvSelectedModel = view.findViewById(R.id.tv_selected_model)
         llModelSwitcher = view.findViewById(R.id.ll_model_switcher)
         llVoiceStatus = view.findViewById(R.id.ll_voice_status)
@@ -125,6 +127,9 @@ class ChatFragment : Fragment() {
 
         // 语音按钮 — 开始/结束语音对话
         ivMic?.setOnClickListener { toggleVoiceConversation() }
+
+        // 截图分析按钮 — 获取当前屏幕截图并发送分析
+        ivScreenshot?.setOnClickListener { sendScreenshotAnalysis() }
 
         // 状态条中的停止按钮
         btnVoiceStop?.setOnClickListener { toggleVoiceConversation() }
@@ -262,17 +267,145 @@ class ChatFragment : Fragment() {
         addUserMessage(text)
         addAiThinking()
 
-        val config = ProviderConfig(
+        // 智能判断：有录屏截图时的处理
+        val screenshot = VoiceConversationEngine.latestBitmap
+        val isScreenCaptureRunning = com.gameai.service.ScreenCaptureService.isRunning
+        val hasScreenshotReady = com.gameai.service.ScreenCaptureService.hasScreenshot
+        val visionConfig = prefs.getVisionModelConfig()
+        val hasVisionModel = visionConfig != null && visionConfig.apiKey.isNotBlank()
+
+        val conversationConfig = ProviderConfig(
             provider = selectedProvider ?: ModelProvider.OPENAI,
             apiKey = selectedApiKey,
             baseUrl = selectedBaseUrl,
             modelName = selectedModelName
         )
 
+        android.util.Log.d("ChatFragment", "📸 截图状态: screenshot=${screenshot != null}, " +
+                "录屏运行=${isScreenCaptureRunning}, " +
+                "截图就绪=${hasScreenshotReady}, " +
+                "视觉模型=${hasVisionModel}")
+
+        when {
+            // 情况1：有截图 + 有视觉模型 → 先OCR识别，再用对话模型
+            screenshot != null && hasVisionModel -> {
+                android.util.Log.d("ChatFragment", "📸 检测到录屏，先进行OCR识别")
+                val scope = CoroutineScope(Dispatchers.Main)
+                scope.launch {
+                    val ocrResult = withContext(Dispatchers.IO) {
+                        CloudAiClient.ocrRecognize(screenshot, visionConfig!!)
+                    }
+                    if (ocrResult != null && ocrResult.isNotBlank()) {
+                        addScreenOcrMessage(ocrResult)
+                        val enhancedMessage = buildString {
+                            append("【当前屏幕内容】\n")
+                            append(ocrResult)
+                            append("\n\n【用户问题】\n")
+                            append(text)
+                        }
+                        startConversation(null, conversationConfig, enhancedMessage)
+                    } else {
+                        android.util.Log.w("ChatFragment", "OCR识别失败，直接传图给对话模型")
+                        startConversation(screenshot, conversationConfig, text)
+                    }
+                }
+            }
+            // 情况2：有截图 + 无视觉模型 → 直接把截图传给对话模型
+            screenshot != null && !hasVisionModel -> {
+                android.util.Log.d("ChatFragment", "📸 有截图但无专门视觉模型，直接传图给对话模型")
+                startConversation(screenshot, conversationConfig, text)
+            }
+            // 情况3：录屏在运行但暂无截图（第一帧还没捕获）
+            screenshot == null && isScreenCaptureRunning && !hasScreenshotReady -> {
+                android.util.Log.w("ChatFragment", "录屏正在运行但第一帧还未捕获，稍等后重试")
+                removeStreamingPlaceholder()
+                addSystemMessage("⏳ 正在获取屏幕画面，请稍候再试...")
+            }
+            // 情况4：录屏已就绪但截图暂时为null（可能正在处理中）
+            screenshot == null && isScreenCaptureRunning && hasScreenshotReady -> {
+                android.util.Log.d("ChatFragment", "录屏已就绪，暂时无截图，进行正常对话")
+                startConversation(null, conversationConfig, text)
+            }
+            // 情况5：无截图 + 录屏没运行 → 正常对话
+            else -> {
+                startConversation(null, conversationConfig, text)
+            }
+        }
+    }
+
+    private fun startConversation(
+        bitmap: android.graphics.Bitmap?,
+        config: com.gameai.model.ProviderConfig,
+        message: String
+    ) {
         activeStreamingCall = CloudAiClient.converseStreaming(
-            bitmap = null,
+            bitmap = bitmap,
             config = config,
-            userMessage = text,
+            userMessage = message,
+            onToken = { accumulated -> updateStreamingMessage(accumulated, false) },
+            onComplete = { fullText -> updateStreamingMessage(fullText, true) },
+            onError = { error ->
+                mainHandler.post {
+                    removeStreamingPlaceholder()
+                    addSystemMessage("❌ $error")
+                    Toast.makeText(requireContext(), error, Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
+    // ============================================================
+    //  截图分析
+    // ============================================================
+
+    private fun sendScreenshotAnalysis() {
+        if (selectedApiKey.isBlank()) {
+            Toast.makeText(requireContext(), "请先选择对话模型", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // 1. 优先从录屏服务获取最新截图（开启AI分析时）
+        val screenshot = VoiceConversationEngine.latestBitmap
+        val isScreenCaptureRunning = com.gameai.service.ScreenCaptureService.isRunning
+
+        if (screenshot == null) {
+            if (isScreenCaptureRunning) {
+                Toast.makeText(requireContext(), "正在获取屏幕画面，请稍候再试", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(requireContext(), "没有可用的屏幕截图，请先开启AI分析", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        val promptText = etInput?.text?.toString()?.trim() ?: "请分析这张图片"
+        val userPrompt = if (promptText.isNotEmpty()) promptText else "请分析这张图片"
+
+        etInput?.text?.clear()
+        activeStreamingCall?.cancel()
+        activeStreamingCall = null
+
+        addUserMessage(userPrompt)
+        addAiThinking()
+
+        // 使用视觉模型配置（如果有的话），否则用当前选中的模型
+        val visionConfig = prefs.getVisionModelConfig()
+        val config = if (visionConfig != null && visionConfig.apiKey.isNotBlank()) {
+            visionConfig
+        } else {
+            ProviderConfig(
+                provider = selectedProvider ?: ModelProvider.OPENAI,
+                apiKey = selectedApiKey,
+                baseUrl = selectedBaseUrl,
+                modelName = selectedModelName
+            )
+        }
+
+        android.util.Log.d("ChatFragment", "📸 使用视觉模型: ${config.modelName}")
+
+        activeStreamingCall = CloudAiClient.converseStreaming(
+            bitmap = screenshot,
+            config = config,
+            userMessage = userPrompt,
             onToken = { accumulated -> updateStreamingMessage(accumulated, false) },
             onComplete = { fullText -> updateStreamingMessage(fullText, true) },
             onError = { error ->
@@ -328,6 +461,10 @@ class ChatFragment : Fragment() {
                         val cmdType = intent.getStringExtra(VoiceCommandHandler.EXTRA_COMMAND_TYPE) ?: ""
                         mainHandler.post { addSystemMessage("✅ 已执行: $cmdType") }
                     }
+                    com.gameai.service.ScreenCaptureService.ACTION_CAPTURE_STATUS -> {
+                        val status = intent.getStringExtra(com.gameai.service.ScreenCaptureService.EXTRA_CAPTURE_STATUS)
+                        mainHandler.post { handleCaptureStatus(status) }
+                    }
                 }
             }
         }
@@ -336,8 +473,27 @@ class ChatFragment : Fragment() {
             addAction(VoiceConversationEngine.ACTION_VOICE_MESSAGE)
             addAction(VoiceConversationEngine.ACTION_VOICE_STREAMING)
             addAction(VoiceCommandHandler.ACTION_VOICE_COMMAND)
+            addAction(com.gameai.service.ScreenCaptureService.ACTION_CAPTURE_STATUS)
         }
         LocalBroadcastManager.getInstance(requireContext()).registerReceiver(voiceReceiver!!, filter)
+    }
+
+    private fun handleCaptureStatus(status: String?) {
+        when (status) {
+            com.gameai.service.ScreenCaptureService.STATUS_READY -> {
+                android.util.Log.d("ChatFragment", "📹 录屏已准备好，等待第一帧...")
+            }
+            com.gameai.service.ScreenCaptureService.STATUS_FIRST_FRAME -> {
+                android.util.Log.d("ChatFragment", "✅ 录屏第一帧已捕获，可以开始分析了")
+                // 可以在这里给用户一个提示
+                // Toast.makeText(requireContext(), "✅ 屏幕已捕获，可以开始对话", Toast.LENGTH_SHORT).show()
+            }
+            com.gameai.service.ScreenCaptureService.STATUS_ERROR -> {
+                val errorMsg = status ?: "未知错误"
+                android.util.Log.e("ChatFragment", "❌ 录屏出错: $errorMsg")
+                Toast.makeText(requireContext(), "录屏出错: $errorMsg", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     private fun updateVoiceStateUI() {
@@ -387,6 +543,7 @@ class ChatFragment : Fragment() {
                 }
             }
             "system" -> addSystemMessage(text)
+            "screen_ocr" -> addScreenOcrMessage(text)
         }
     }
 
@@ -437,6 +594,12 @@ class ChatFragment : Fragment() {
             messages.removeAt(0)
             adapter.notifyItemRemoved(0)
         }
+        scrollToBottom()
+    }
+
+    private fun addScreenOcrMessage(text: String) {
+        messages.add(ChatMessage("📷 屏幕识别内容：\n$text", ChatMessage.Type.SCREEN_OCR))
+        adapter.notifyItemInserted(messages.size - 1)
         scrollToBottom()
     }
 
@@ -505,6 +668,7 @@ class ChatFragment : Fragment() {
                 ChatMessage.Type.USER -> R.layout.item_chat_message_user
                 ChatMessage.Type.AI -> R.layout.item_chat_message_ai
                 ChatMessage.Type.SYSTEM -> R.layout.item_chat_message_system
+                ChatMessage.Type.SCREEN_OCR -> R.layout.item_chat_message_screen_ocr
             }
             return ViewHolder(LayoutInflater.from(parent.context).inflate(layoutRes, parent, false))
         }
@@ -535,6 +699,6 @@ class ChatFragment : Fragment() {
         val type: Type,
         val isStreaming: Boolean = false
     ) {
-        enum class Type { USER, AI, SYSTEM }
+        enum class Type { USER, AI, SYSTEM, SCREEN_OCR }
     }
 }
