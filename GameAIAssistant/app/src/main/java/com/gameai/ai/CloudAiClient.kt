@@ -286,7 +286,7 @@ object CloudAiClient {
     }
 
     /** 回退到阻塞模式调用 */
-    private fun fallbackToBlockingMode(
+    private suspend fun fallbackToBlockingMode(
         bitmap: Bitmap?,
         config: ProviderConfig,
         userMessage: String,
