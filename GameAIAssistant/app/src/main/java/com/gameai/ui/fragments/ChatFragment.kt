@@ -150,7 +150,7 @@ class ChatFragment : Fragment() {
             selectedModelName = config.modelName
             selectedApiKey = config.apiKey
             selectedBaseUrl = config.baseUrl
-            tvSelectedModel?.text = "${config.provider.displayName} · ${config.modelName.take(15)}"
+            tvSelectedModel?.text = "${config.modelName.take(15)} · ${config.provider.displayName}"
         } else {
             val base = prefs.getCurrentProviderConfig()
             if (base.apiKey.isNotBlank()) {
@@ -159,7 +159,7 @@ class ChatFragment : Fragment() {
                 selectedModelName = base.modelName
                 selectedApiKey = base.apiKey
                 selectedBaseUrl = base.baseUrl
-                tvSelectedModel?.text = "${base.provider.displayName} · ${base.modelName.take(15)}"
+                tvSelectedModel?.text = "${base.modelName.take(15)} · ${base.provider.displayName}"
             } else {
                 tvSelectedModel?.text = "选择模型"
             }
@@ -175,7 +175,7 @@ class ChatFragment : Fragment() {
 
             if (providerConfig.models.isEmpty()) {
                 options.add(ModelOption(
-                    label = "${providerConfig.provider.displayName} · ${providerConfig.modelName}",
+                    label = "${providerConfig.modelName} · ${providerConfig.provider.displayName}",
                     provider = providerConfig.provider,
                     providerName = providerConfig.provider.displayName,
                     modelName = providerConfig.modelName,
@@ -187,7 +187,7 @@ class ChatFragment : Fragment() {
                     if (binding.matches("conversation") || binding.matches("all")) {
                         val label = binding.displayLabel.ifBlank { binding.modelName }
                         options.add(ModelOption(
-                            label = "${providerConfig.provider.displayName} · $label",
+                            label = "$label · ${providerConfig.provider.displayName}",
                             provider = providerConfig.provider,
                             providerName = providerConfig.provider.displayName,
                             modelName = binding.modelName,
@@ -213,7 +213,14 @@ class ChatFragment : Fragment() {
                 selectedModelName = selected.modelName
                 selectedApiKey = selected.apiKey
                 selectedBaseUrl = selected.baseUrl
-                tvSelectedModel?.text = "${selected.providerName} · ${selected.modelName.take(15)}"
+                tvSelectedModel?.text = "${selected.modelName.take(15)} · ${selected.providerName}"
+                // 保存选择，下次打开 App 自动使用这个模型
+                prefs.saveConversationModel(
+                    providerName = selected.providerName,
+                    modelName = selected.modelName,
+                    apiKey = selected.apiKey,
+                    baseUrl = selected.baseUrl
+                )
                 addSystemMessage("已切换到 ${selected.label}")
             }
             .show()

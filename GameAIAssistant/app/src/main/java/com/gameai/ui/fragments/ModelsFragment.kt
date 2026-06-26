@@ -370,6 +370,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
                 setOnClickListener {
                     currentModels.removeAt(idx)
                     renderBoundModels()
+                    autoSaveProviderModels()
                 }
             }
             card.addView(delBtn)
@@ -455,6 +456,8 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
                     currentModels.add(binding)
                 }
                 renderBoundModels()
+                // 自动保存配置
+                autoSaveProviderModels()
             }
             .setNegativeButton("取消", null)
             .show()
@@ -692,6 +695,51 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
 
     // ===== 保存配置 =====
 
+    /**
+     * 自动保存当前供应商的模型配置（添加/编辑模型后自动调用）
+     */
+    private fun autoSaveProviderModels() {
+        val apiKey = binding.etApiKey.text.toString().trim()
+        val baseUrl = binding.etBaseUrl.text.toString().trim()
+
+        val newCfg = ProviderConfig(
+            provider = currentProvider,
+            apiKey = apiKey,
+            baseUrl = baseUrl.ifEmpty { currentProvider.defaultBaseUrl },
+            modelName = currentModels.firstOrNull()?.modelName ?: currentProvider.defaultModel,
+            enabled = true,
+            models = currentModels.toList()
+        )
+
+        providerConfigs[currentProvider.name] = newCfg
+
+        // 写 MMKV
+        prefs.saveString("provider_${currentProvider.name}_api_key", apiKey)
+        prefs.saveString("provider_${currentProvider.name}_base_url", baseUrl.ifEmpty { currentProvider.defaultBaseUrl })
+        prefs.saveString("provider_${currentProvider.name}_model", currentModels.firstOrNull()?.modelName ?: "")
+        prefs.saveString("provider_${currentProvider.name}_enabled", "true")
+        prefs.saveString("current_provider", currentProvider.name)
+        // 保存多模型 JSON
+        val modelsJson = org.json.JSONArray()
+        currentModels.forEach { m ->
+            modelsJson.put(org.json.JSONObject().apply {
+                put("id", m.id); put("modelName", m.modelName)
+                put("displayLabel", m.displayLabel); put("usedFor", m.usedFor)
+            })
+        }
+        prefs.saveString("provider_${currentProvider.name}_models", modelsJson.toString())
+
+        // 同时更新 GameConfig
+        val updatedConfig = config.copy(
+            currentProvider = currentProvider,
+            cloudProviderConfigs = providerConfigs.toMap()
+        )
+        prefs.saveConfig(updatedConfig)
+
+        refreshAllChipStyles()
+        refreshConfiguredProvidersOverview()
+    }
+
     private fun saveConfig() {
         val apiKey = binding.etApiKey.text.toString().trim()
         val baseUrl = binding.etBaseUrl.text.toString().trim()
@@ -713,39 +761,8 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
             warnings.add("当前供应商不支持语音转文字且未绑定STT模型，语音对话将无法使用")
         }
 
-        val newCfg = ProviderConfig(
-            provider = currentProvider,
-            apiKey = apiKey,
-            baseUrl = baseUrl.ifEmpty { currentProvider.defaultBaseUrl },
-            modelName = currentModels.first().modelName,
-            enabled = true,
-            models = currentModels.toList()
-        )
-
-        providerConfigs[currentProvider.name] = newCfg
-
-        // 写 MMKV（直接写，绕过 GameConfig 延迟问题）
-        prefs.saveString("provider_${currentProvider.name}_api_key", apiKey)
-        prefs.saveString("provider_${currentProvider.name}_base_url", baseUrl.ifEmpty { currentProvider.defaultBaseUrl })
-        prefs.saveString("provider_${currentProvider.name}_model", currentModels.first().modelName)
-        prefs.saveString("provider_${currentProvider.name}_enabled", "true")
-        prefs.saveString("current_provider", currentProvider.name)
-        // 保存多模型 JSON
-        val modelsJson = org.json.JSONArray()
-        currentModels.forEach { m ->
-            modelsJson.put(org.json.JSONObject().apply {
-                put("id", m.id); put("modelName", m.modelName)
-                put("displayLabel", m.displayLabel); put("usedFor", m.usedFor)
-            })
-        }
-        prefs.saveString("provider_${currentProvider.name}_models", modelsJson.toString())
-
-        // 同时更新 GameConfig
-        val updatedConfig = config.copy(
-            currentProvider = currentProvider,
-            cloudProviderConfigs = providerConfigs.toMap()
-        )
-        prefs.saveConfig(updatedConfig)
+        // 使用自动保存方法
+        autoSaveProviderModels()
 
         refreshAllChipStyles()
         refreshConfiguredProvidersOverview()

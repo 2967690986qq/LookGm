@@ -86,7 +86,7 @@ class CloudSpeechRecognizer(
         private const val SPEECH_END_THRESHOLD = 250.0
         private const val SILENCE_CHUNKS_FOR_END = 5      // 连续 5 个静音帧 ≈ 800ms 后自动结束
         private const val MAX_RECORD_DURATION_MS = 15000L  // 最长录音 15 秒（安全保护）
-        private const val WARM_UP_DURATION_MS = 600L        // 录音预热期：启动后 600ms 内抑制 VAD，防止 TTS 残留回声误识别
+        private const val BARGE_IN_COOLDOWN_MS = 400L      // 进入监听模式后 400ms 内不触发打断（给 AEC 稳定时间）
 
         // 自适应噪声底噪估计
         private const val NOISE_FLOOR_WINDOW = 20
@@ -111,6 +111,12 @@ class CloudSpeechRecognizer(
     @Volatile private var isRecording = false
     @Volatile private var isSpeechActive = false
     private var recordingStartTime = 0L  // 录音开始时间戳，用于预热期判断
+
+    // ===== 打断监听模式（豆包式交互） =====
+    // 用于 TTS 播报期间保持麦克风开启，检测用户打断语音
+    private var isMonitorMode = false          // 仅 VAD 监听，不累积音频/不调 STT API
+    private var bargeInCallback: (() -> Unit)? = null
+    private var monitorStartTime = 0L          // 进入监听模式时间戳，抑制初始误触发
 
     /**
      * 永久停止标志：设为 true 后，所有自动重启将被忽略。
@@ -257,10 +263,177 @@ class CloudSpeechRecognizer(
         Log.d(TAG, "stopListening() 完成 — AudioRecord 已释放，协程已取消")
     }
 
-    fun pauseListening() {
+    /**
+     * 豆包式打断监听模式：TTS 播报期间保持麦克风开启，
+     * 仅运行 VAD 检测用户是否说话，不累积音频、不调用 STT API。
+     * AEC（回声消除）负责过滤 TTS 播报声音，防止自识别。
+     *
+     * 检测到用户说话 → 回调 onBargeIn → 上层停止 TTS + 切换到正常聆听模式。
+     */
+    fun startMonitorMode(onBargeIn: () -> Unit) {
+        // 权限检查
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+                Log.w(TAG, "startMonitorMode: 无录音权限")
+                return
+            }
+        }
+
+        // 先停止当前录音（如果有）
+        stopInternal()
+
+        isPermanentlyStopped = false
+        isMonitorMode = true
+        bargeInCallback = onBargeIn
+        monitorStartTime = System.currentTimeMillis()
+        accumulatedAudio.reset()
+        isSpeechActive = false
+        speechFrameCount = 0
+        silenceFrameCount = 0
+
+        val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+        val bufSize = maxOf(minBufSize, BUFFER_SIZE * 2)
+
+        try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                SAMPLE_RATE,
+                CHANNEL_CONFIG,
+                AUDIO_FORMAT,
+                bufSize
+            )
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                audioRecord?.release()
+                audioRecord = null
+                Log.w(TAG, "监听模式 AudioRecord 初始化失败")
+                return
+            }
+
+            initNoiseReduction()  // AEC + NS 消除 TTS 回声
+
+            audioRecord?.startRecording()
+            isRecording = true
+            recordingStartTime = System.currentTimeMillis()
+
+            // 重置自适应 VAD
+            recentNoiseLevels.clear()
+            estimatedNoiseFloor = 100.0
+            adaptiveSpeechStart = SPEECH_START_THRESHOLD.toDouble()
+            adaptiveSpeechEnd = SPEECH_END_THRESHOLD.toDouble()
+
+            Log.d(TAG, "👂 打断监听模式已启动 (AEC=ON, 仅VAD)")
+
+            currentThread = Thread {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                monitorAudioLoop()
+            }.apply { start() }
+
+        } catch (e: Exception) {
+            Log.w(TAG, "监听模式启动失败: ${e.message}")
+        }
+    }
+
+    /** 停止打断监听模式，释放 AudioRecord */
+    fun stopMonitorMode() {
+        Log.d(TAG, "停止打断监听模式")
+        isMonitorMode = false
+        bargeInCallback = null
+        stopInternal()
+    }
+
+    /** 内部停止（不设置 isPermanentlyStopped） */
+    private fun stopInternal() {
         isRecording = false
-        isPermanentlyStopped = true
-        try { audioRecord?.stop() } catch (_: Exception) {}
+        mainHandler.removeCallbacksAndMessages(null)
+        currentThread?.interrupt()
+        currentThread = null
+        releaseHardware()
+    }
+
+    /** 监听模式音频循环：只做 VAD，不累积音频，不调 API */
+    private fun monitorAudioLoop() {
+        val buffer = ByteArray(BUFFER_SIZE)
+        var vadCheckCounter = 0
+
+        while (isRecording && isMonitorMode && !Thread.currentThread().isInterrupted) {
+            val bytesRead = audioRecord?.read(buffer, 0, BUFFER_SIZE) ?: -1
+
+            if (bytesRead <= 0) {
+                if (!isRecording) break
+                continue
+            }
+
+            // 每 8 次读取（≈ 100ms）做一次 VAD 检测
+            vadCheckCounter++
+            if (vadCheckCounter >= 8) {
+                vadCheckCounter = 0
+                checkMonitorVad(buffer, bytesRead)
+            }
+        }
+    }
+
+    /** 监听模式 VAD：检测到用户说话 → 触发打断回调 */
+    private fun checkMonitorVad(buffer: ByteArray, length: Int) {
+        val rms = calculateRms(buffer, length)
+        val rmsDisplay = (rms / 1000.0).toFloat().coerceIn(0f, 15f)
+        mainHandler.post { onRmsChanged(rmsDisplay) }
+
+        // 冷却期：进入监听模式后 BARGE_IN_COOLDOWN_MS 内不触发打断
+        // 给 AEC 稳定时间，防止 TTS 刚开播的瞬态回声误触发
+        val elapsed = System.currentTimeMillis() - monitorStartTime
+        if (elapsed < BARGE_IN_COOLDOWN_MS) {
+            // 冷却期内只采集噪声底噪
+            recentNoiseLevels.add(rms)
+            if (recentNoiseLevels.size > NOISE_FLOOR_WINDOW) {
+                recentNoiseLevels.removeAt(0)
+            }
+            if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
+                val sorted = recentNoiseLevels.sorted()
+                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
+                adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
+                    .coerceAtLeast(SPEECH_START_THRESHOLD)
+            }
+            return
+        }
+
+        // 持续更新噪声底噪
+        if (!isSpeechActive) {
+            recentNoiseLevels.add(rms)
+            if (recentNoiseLevels.size > NOISE_FLOOR_WINDOW) {
+                recentNoiseLevels.removeAt(0)
+            }
+            if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
+                val sorted = recentNoiseLevels.sorted()
+                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
+                adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
+                    .coerceAtLeast(SPEECH_START_THRESHOLD)
+            }
+        }
+
+        // 打断检测：检测到持续语音 → 用户正在说话
+        if (rms > adaptiveSpeechStart) {
+            speechFrameCount++
+            if (speechFrameCount >= 5) {  // 连续 5 帧（≈ 500ms）确认，防止 AEC 漏过的短回声
+                Log.d(TAG, "🔊 检测到用户打断 (RMS=${rms.toInt()}>阈值=${adaptiveSpeechStart.toInt()})")
+                mainHandler.post {
+                    bargeInCallback?.invoke()
+                }
+                // 打断触发后停止监听（上层会重建）
+                isMonitorMode = false
+                isRecording = false
+            }
+        } else {
+            speechFrameCount = maxOf(speechFrameCount - 1, 0)
+        }
+    }
+
+    /** @deprecated 豆包模式不再需要暂停麦克风，保留空实现兼容旧调用 */
+    @Deprecated("使用 startMonitorMode/stopMonitorMode 替代", ReplaceWith("stopMonitorMode()"))
+    fun pauseListening() {
+        Log.d(TAG, "pauseListening() 已废弃，改用 stopMonitorMode()")
+        stopMonitorMode()
     }
 
     fun resumeListening() {
@@ -311,26 +484,6 @@ class CloudSpeechRecognizer(
         val rms = calculateRms(buffer, length)
         val rmsDisplay = (rms / 1000.0).toFloat().coerceIn(0f, 15f)
         mainHandler.post { onRmsChanged(rmsDisplay) }
-
-        // 预热期：录音启动后 WARM_UP_DURATION_MS 内抑制 VAD 语音检测
-        // 目的：防止 TTS 播报残留回声被误识别为用户语音
-        val elapsed = System.currentTimeMillis() - recordingStartTime
-        if (elapsed < WARM_UP_DURATION_MS) {
-            // 预热期内仅做噪声底噪估计，不触发语音检测
-            recentNoiseLevels.add(rms)
-            if (recentNoiseLevels.size > NOISE_FLOOR_WINDOW) {
-                recentNoiseLevels.removeAt(0)
-            }
-            if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
-                val sorted = recentNoiseLevels.sorted()
-                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
-                adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
-                    .coerceAtLeast(SPEECH_START_THRESHOLD)
-                adaptiveSpeechEnd = (estimatedNoiseFloor * 1.4)
-                    .coerceAtLeast(SPEECH_END_THRESHOLD)
-            }
-            return
-        }
 
         // 更新噪声底噪估计（仅在非语音期间采样）
         if (!isSpeechActive) {

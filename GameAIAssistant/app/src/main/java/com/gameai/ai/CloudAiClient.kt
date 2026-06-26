@@ -197,7 +197,8 @@ object CloudAiClient {
                         val choices = json.optJSONArray("choices")
                         if (choices != null && choices.length() > 0) {
                             val delta = choices.getJSONObject(0).optJSONObject("delta")
-                            val content = delta?.optString("content", "") ?: ""
+                            val contentObj = delta?.opt("content")
+                            val content = if (contentObj is String) contentObj else ""
                             if (content.isNotEmpty()) {
                                 accumulated.append(content)
                                 Handler(Looper.getMainLooper()).post {
@@ -527,7 +528,9 @@ object CloudAiClient {
             val choices = json.getJSONArray("choices")
             if (choices.length() > 0) {
                 val message = choices.getJSONObject(0).getJSONObject("message")
-                message.getString("content").trim()
+                val contentObj = message.opt("content")
+                val content = if (contentObj is String) contentObj.trim() else ""
+                content.ifBlank { null }
             } else null
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Parse error", e)

@@ -17,17 +17,18 @@
         android:textSize="18sp"
         android:background="@drawable/bg_avatar_ai" />
 
-    <!-- AI 消息靠左 -->
+    <!-- AI 消息靠左，气泡自适应宽度，最大占屏幕 80% -->
     <LinearLayout
-        android:layout_width="0dp"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_weight="1"
+        android:layout_marginEnd="40dp"
         android:orientation="vertical">
 
         <TextView
             android:id="@+id/tv_content"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:maxWidth="280dp"
             android:padding="12dp"
             android:background="@drawable/bg_chat_bubble_ai"
             android:textColor="#E8ECF1"

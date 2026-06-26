@@ -139,9 +139,14 @@ class VoiceService : Service(), TextToSpeech.OnInitListener {
             sttCallback = null
         }
 
-        /** 暂停麦克风录音（不释放资源，TTS播报期间防止自识别） */
-        fun pauseListening() {
-            cloudRecognizer?.pauseListening()
+        /** 豆包式打断监听：TTS 播报时保持麦克风开启，仅做 VAD 检测用户打断 */
+        fun startBargeInDetection(onBargeIn: () -> Unit) {
+            cloudRecognizer?.startMonitorMode(onBargeIn)
+        }
+
+        /** 停止打断监听 */
+        fun stopBargeInDetection() {
+            cloudRecognizer?.stopMonitorMode()
         }
 
         fun isListening(): Boolean = cloudRecognizer != null

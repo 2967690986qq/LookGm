@@ -103,14 +103,16 @@ object VoiceConversationEngine {
         appContext = context.applicationContext
         VoiceService.onSpeakDone = {
             if (isActive && state == State.SPEAKING) {
+                // 停止打断监听（TTS 播完，不再需要检测打断）
+                stopBargeInDetection()
+
                 // v3.0: 连续对话模式 — TTS 说完自动开始下一轮聆听
                 if (continuousConversation && !isListeningPaused) {
                     transitionState(State.IDLE)
                     Handler(Looper.getMainLooper()).postDelayed({
                         if (isActive && !isListeningPaused) startListening()
-                    }, 1000)  // 1秒停顿，确保 TTS 播报音频完全消散后再开始录音
+                    }, 300)  // 短暂停顿让 AEC 缓冲清空
                 } else if (isListeningPaused) {
-                    // 暂停聆听时，停留在 IDLE 不自动重启
                     transitionState(State.IDLE)
                     broadcastMessage("system", "聆听已暂停，说\"继续听\"恢复")
                 } else {
@@ -196,6 +198,9 @@ object VoiceConversationEngine {
         VoiceService.stopSpeaking()
         VoiceService.clearSpeakQueue()
 
+        // 3.5 停止打断监听
+        stopBargeInDetection()
+
         // 4. 重置状态
         spokenSentenceCount = 0
         currentCommand = null
@@ -228,10 +233,13 @@ object VoiceConversationEngine {
         VoiceService.stopSpeaking()
         VoiceService.clearSpeakQueue()
 
-        // 3. 重置分句计数
+        // 3. 停止打断监听（即将切换到正常聆听模式）
+        stopBargeInDetection()
+
+        // 4. 重置分句计数
         spokenSentenceCount = 0
 
-        // 4. 通知 UI 流式结束
+        // 5. 通知 UI 流式结束
         broadcastStreamingEnd()
     }
 
@@ -344,6 +352,28 @@ object VoiceConversationEngine {
 
     private fun stopListening() {
         VoiceService.stopListening()
+    }
+
+    /**
+     * 豆包式打断监听：TTS 播报期间麦克风保持开启，
+     * 仅运行 VAD 检测用户是否在说话（不调用 STT API）。
+     * AEC 硬件回声消除负责过滤 TTS 音频不被误识别。
+     *
+     * 检测到用户说话 → performBargeIn() → 停止 TTS → 立即切换到正常聆听。
+     */
+    private fun startBargeInDetection() {
+        VoiceService.startBargeInDetection {
+            android.util.Log.i(TAG, "VAD 检测到打断语音")
+            performBargeIn()
+            // 打断后立即开始新一轮聆听（用户的打断语音本身会被捕获）
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (isActive && !isListeningPaused) startListening()
+            }, 100)
+        }
+    }
+
+    private fun stopBargeInDetection() {
+        VoiceService.stopBargeInDetection()
     }
 
     // ============================================================
@@ -624,10 +654,11 @@ object VoiceConversationEngine {
             resetIdleTimer()
         }
 
-        // 进入 SPEAKING：暂停麦克风录音，防止 TTS 播报被 STT 自识别
+        // 进入 SPEAKING：启动打断监听（麦克风保持开启，AEC 消除 TTS 回声）
+        // 用户说话 → VAD 检测 → bargeIn → 停止 TTS → 立即聆听
         if (newState == State.SPEAKING) {
             isBargingIn = false
-            VoiceService.pauseListening()
+            startBargeInDetection()
         }
     }
 

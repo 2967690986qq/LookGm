@@ -79,16 +79,26 @@ class PreferencesManager(context: Context) {
     fun getLocalModelName(): String = kv.decodeString("local_model_name") ?: "qwen2.5:7b"
 
     // ========== 多模型绑定配置 ==========
-    /** 构建对话模型配置：优先从ProviderConfig.models中选conversation标签 */
+    /** 构建对话模型配置：优先使用用户选择的模型，其次从ProviderConfig.models中选conversation标签 */
     fun getConversationModelConfig(): ProviderConfig? {
-        val baseConfig = getCurrentProviderConfig()
-        if (baseConfig.models.isEmpty()) {
-            // 旧版兼容：检查 conversation_model_name
-            val convModel = kv.decodeString("conversation_model_name") ?: ""
-            if (convModel.isNotBlank()) return baseConfig.copy(modelName = convModel)
-            return baseConfig
+        // 1. 优先使用用户在 ChatFragment 中选择的模型
+        val savedConfig = getSavedConversationConfig()
+        if (savedConfig != null) return savedConfig
+
+        // 2. 旧版兼容：检查 conversation_model_name
+        val convModel = kv.decodeString("conversation_model_name") ?: ""
+        if (convModel.isNotBlank()) {
+            val baseConfig = getCurrentProviderConfig()
+            return baseConfig.copy(modelName = convModel)
         }
-        return baseConfig.forPurpose("conversation")
+
+        // 3. 从 ProviderConfig.models 中选择 conversation 标签的模型
+        val baseConfig = getCurrentProviderConfig()
+        if (baseConfig.models.isNotEmpty()) {
+            return baseConfig.forPurpose("conversation")
+        }
+
+        return baseConfig
     }
 
     /** 构建分析模型配置：优先从ProviderConfig.models中选analysis标签 */
@@ -140,6 +150,35 @@ class PreferencesManager(context: Context) {
         return if (sttBinding != null)
             config.copy(modelName = sttBinding.modelName)
         else null
+    }
+
+    // ========== 对话模型选择保存 ==========
+    /** 保存对话模型选择（用于 ChatFragment 模型切换器） */
+    fun saveConversationModel(providerName: String, modelName: String, apiKey: String, baseUrl: String) {
+        kv.encode("conversation_provider", providerName)
+        kv.encode("conversation_model_name", modelName)
+        kv.encode("conversation_api_key", apiKey)
+        kv.encode("conversation_base_url", baseUrl)
+    }
+
+    /** 获取保存的对话模型配置（优先于 ProviderConfig.models） */
+    fun getSavedConversationConfig(): ProviderConfig? {
+        val modelName = kv.decodeString("conversation_model_name") ?: return null
+        val apiKey = kv.decodeString("conversation_api_key") ?: return null
+        val baseUrl = kv.decodeString("conversation_base_url") ?: return null
+        val providerName = kv.decodeString("conversation_provider") ?: return null
+
+        if (apiKey.isBlank() || modelName.isBlank()) return null
+
+        // 根据 providerName 找到对应的 ModelProvider
+        val provider = ModelProvider.fromName(providerName)
+
+        return ProviderConfig(
+            provider = provider,
+            apiKey = apiKey,
+            baseUrl = baseUrl,
+            modelName = modelName
+        )
     }
 
     // ========== 通用读写 ==========
