@@ -81,16 +81,20 @@ class CloudSpeechRecognizer(
         private const val BUFFER_SIZE = 2048
 
         // ===== VAD 语音活动检测参数 =====
-        // 用于自动检测用户是否说完话（静音 800ms 自动停止并识别）
-        private const val SPEECH_START_THRESHOLD = 400.0
-        private const val SPEECH_END_THRESHOLD = 250.0
-        private const val SILENCE_CHUNKS_FOR_END = 5      // 连续 5 个静音帧 ≈ 800ms 后自动结束
+        // 用于自动检测用户是否说完话（静音 ~400ms 自动停止并识别）
+        // VAD_CHECK_INTERVAL=2 帧 × 64ms ≈ 128ms 间隔，2 次静音 ≈ 256ms 触发结束
+        private const val SPEECH_START_THRESHOLD = 600.0   // 提高阈值，避免扬声器回声误触发
+        private const val SPEECH_END_THRESHOLD = 350.0     // 提高静音阈值，更敏感地检测停顿
+        private const val SILENCE_CHUNKS_FOR_END = 2       // 连续 2 个静音帧 ≈ 256ms 后自动结束（加速响应）
+        private const val VAD_CHECK_INTERVAL = 2           // 每 2 次音频读取做一次 VAD（128ms）
         private const val MAX_RECORD_DURATION_MS = 15000L  // 最长录音 15 秒（安全保护）
         private const val BARGE_IN_COOLDOWN_MS = 400L      // 进入监听模式后 400ms 内不触发打断（给 AEC 稳定时间）
+        private const val NORMAL_WARM_UP_MS = 300L         // 正常录音前 300ms 不触发语音检测（AEC 缓冲清空）
 
         // 自适应噪声底噪估计
         private const val NOISE_FLOOR_WINDOW = 20
-        private const val ADAPTIVE_FACTOR = 1.8
+        private const val NOISE_FLOOR_MIN = 80.0           // 噪声底噪最低值（提高避免误触发）
+        private const val ADAPTIVE_FACTOR = 2.2            // 自适应系数（提高，更严格判断语音）
 
         // ===== SiliconFlow API =====
         // POST https://api.siliconflow.cn/v1/audio/transcriptions (multipart/form-data)
@@ -184,7 +188,7 @@ class CloudSpeechRecognizer(
 
         try {
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,  // 通信用音频源，AEC 回声消除路由更优
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -297,7 +301,7 @@ class CloudSpeechRecognizer(
 
         try {
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,  // 通信用音频源，AEC 回声消除路由更优
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -365,9 +369,9 @@ class CloudSpeechRecognizer(
                 continue
             }
 
-            // 每 8 次读取（≈ 100ms）做一次 VAD 检测
+            // 每 VAD_CHECK_INTERVAL 次读取做一次 VAD 检测
             vadCheckCounter++
-            if (vadCheckCounter >= 8) {
+            if (vadCheckCounter >= VAD_CHECK_INTERVAL) {
                 vadCheckCounter = 0
                 checkMonitorVad(buffer, bytesRead)
             }
@@ -391,7 +395,7 @@ class CloudSpeechRecognizer(
             }
             if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
                 val sorted = recentNoiseLevels.sorted()
-                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
+                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(NOISE_FLOOR_MIN)
                 adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
                     .coerceAtLeast(SPEECH_START_THRESHOLD)
             }
@@ -406,7 +410,7 @@ class CloudSpeechRecognizer(
             }
             if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
                 val sorted = recentNoiseLevels.sorted()
-                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
+                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(NOISE_FLOOR_MIN)
                 adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
                     .coerceAtLeast(SPEECH_START_THRESHOLD)
             }
@@ -415,7 +419,7 @@ class CloudSpeechRecognizer(
         // 打断检测：检测到持续语音 → 用户正在说话
         if (rms > adaptiveSpeechStart) {
             speechFrameCount++
-            if (speechFrameCount >= 5) {  // 连续 5 帧（≈ 500ms）确认，防止 AEC 漏过的短回声
+            if (speechFrameCount >= 5) {  // 连续 5 帧（≈ 960ms）确认，防止 AEC 漏过的短回声
                 Log.d(TAG, "🔊 检测到用户打断 (RMS=${rms.toInt()}>阈值=${adaptiveSpeechStart.toInt()})")
                 mainHandler.post {
                     bargeInCallback?.invoke()
@@ -461,9 +465,9 @@ class CloudSpeechRecognizer(
                 accumulatedAudio.write(buffer, 0, bytesRead)
             }
 
-            // 每 8 次读取（≈ 100ms）做一次 VAD 检测
+            // 每 VAD_CHECK_INTERVAL 次读取（≈ 192ms）做一次 VAD 检测
             vadCheckCounter++
-            if (vadCheckCounter >= 8) {
+            if (vadCheckCounter >= VAD_CHECK_INTERVAL) {
                 vadCheckCounter = 0
                 checkVad(buffer, bytesRead)
             }
@@ -478,12 +482,25 @@ class CloudSpeechRecognizer(
      * 基于 RMS 的自适应 VAD：
      *   - 自适应估计环境噪声底噪
      *   - 检测语音开始、结束事件
-     *   - 连续静音 800ms → 触发 onSpeechEnd + onSilence → 自动开始识别
+     *   - 连续静音 ≈ 576ms → 触发 onSpeechEnd + onSilence → 自动开始识别
+     *   - 录音前 NORMAL_WARM_UP_MS 内抑制检测（AEC 缓冲区清空）
      */
     private fun checkVad(buffer: ByteArray, length: Int) {
         val rms = calculateRms(buffer, length)
         val rmsDisplay = (rms / 1000.0).toFloat().coerceIn(0f, 15f)
         mainHandler.post { onRmsChanged(rmsDisplay) }
+
+        // 录音预热期：前 NORMAL_WARM_UP_MS 内不触发语音检测
+        // 让 AEC 缓冲区清空，避免扬声器残留回声被识别成用户语音
+        val recordingElapsed = System.currentTimeMillis() - recordingStartTime
+        if (recordingElapsed < NORMAL_WARM_UP_MS) {
+            // 预热期内只采样噪声底噪，不触发语音开始
+            recentNoiseLevels.add(rms)
+            if (recentNoiseLevels.size > NOISE_FLOOR_WINDOW) {
+                recentNoiseLevels.removeAt(0)
+            }
+            return
+        }
 
         // 更新噪声底噪估计（仅在非语音期间采样）
         if (!isSpeechActive) {
@@ -493,7 +510,7 @@ class CloudSpeechRecognizer(
             }
             if (recentNoiseLevels.size >= NOISE_FLOOR_WINDOW) {
                 val sorted = recentNoiseLevels.sorted()
-                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(50.0)
+                estimatedNoiseFloor = sorted[sorted.size / 2].coerceAtLeast(NOISE_FLOOR_MIN)
                 adaptiveSpeechStart = (estimatedNoiseFloor * ADAPTIVE_FACTOR)
                     .coerceAtLeast(SPEECH_START_THRESHOLD)
                 adaptiveSpeechEnd = (estimatedNoiseFloor * 1.4)
@@ -521,8 +538,8 @@ class CloudSpeechRecognizer(
             if (rms < adaptiveSpeechEnd) {
                 silenceFrameCount++
                 if (silenceFrameCount >= SILENCE_CHUNKS_FOR_END) {
-                    // 连续静音 ≈ 800ms → 用户说完，自动停止并识别
-                    Log.d(TAG, "🔇 VAD 静音结束 (静音帧=$silenceFrameCount, ≈${silenceFrameCount * 160}ms)")
+                    // 连续静音 ≈ 576ms → 用户说完，自动停止并识别
+                    Log.d(TAG, "🔇 VAD 静音结束 (静音帧=$silenceFrameCount, ≈${silenceFrameCount * VAD_CHECK_INTERVAL * 64}ms)")
                     mainHandler.post {
                         onSpeechEnd()
                         onSilence()
@@ -613,9 +630,17 @@ class CloudSpeechRecognizer(
                         onResult(trimmed)
                     }
                 } else {
-                    Log.w(TAG, "识别结果为空")
+                    // 识别结果为空，用户可能只是清了清嗓子或环境太安静
+                    // 不提示错误，静默继续监听（用户不说话时不应该打扰）
+                    Log.d(TAG, "未识别到语音内容，静默继续监听")
+                    // 静默重新开始监听
                     withContext(Dispatchers.Main) {
-                        onError("未识别到语音内容，请尝试大声清晰地说一句话")
+                        releaseHardware()  // 确保硬件已释放
+                        if (!isPermanentlyStopped) {
+                            mainHandler.postDelayed({
+                                if (!isPermanentlyStopped) startListening()
+                            }, 500)
+                        }
                     }
                 }
             } catch (e: Exception) {

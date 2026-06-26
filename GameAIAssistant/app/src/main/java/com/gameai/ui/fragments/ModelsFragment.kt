@@ -93,6 +93,14 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
         startCarousel()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // App 从后台恢复时，重新加载配置并刷新 Chip 状态
+        loadAllProviderConfigs()
+        refreshAllChipStyles()
+        refreshConfiguredProvidersOverview()
+    }
+
     // ===== 加载 =====
 
     private fun loadAllProviderConfigs() {
@@ -419,8 +427,9 @@ class ModelsFragment : Fragment(R.layout.fragment_models) {
             spinnerUsedFor.setSelection(idx)
             onModelNameChanged(existing.modelName)
         } else if (prefillModelName.isNotEmpty()) {
+            // 从模型列表添加时，直接使用模型名称作为显示名，不填充类型标签
             etModelName.setText(prefillModelName)
-            etLabel.setText(ModelClassifier.classifyLabel(prefillModelName).replace(Regex("^[^\\p{L}]+"), ""))
+            etLabel.setText(prefillModelName) // 默认用模型名作为显示名
             onModelNameChanged(prefillModelName)
         }
 

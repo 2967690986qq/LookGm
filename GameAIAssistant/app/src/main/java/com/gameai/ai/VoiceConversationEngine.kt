@@ -368,7 +368,7 @@ object VoiceConversationEngine {
             // 打断后立即开始新一轮聆听（用户的打断语音本身会被捕获）
             Handler(Looper.getMainLooper()).postDelayed({
                 if (isActive && !isListeningPaused) startListening()
-            }, 100)
+            }, 50)  // 仅 50ms，录音器预热期（400ms）会处理 AEC 稳定
         }
     }
 

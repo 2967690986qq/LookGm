@@ -164,21 +164,31 @@ object CloudAiClient {
 
                 if (!response.isSuccessful) {
                     val errorBody = response.body?.string() ?: ""
-                    android.util.Log.w(TAG, "SSE error ${response.code}: $errorBody")
-                    Handler(Looper.getMainLooper()).post {
-                        onError("AI 请求失败 (HTTP ${response.code})")
+                    android.util.Log.e(TAG, "SSE error ${response.code}: $errorBody")
+                    response.close()
+
+                    // 判断是否是不支持流式的错误，自动回退到阻塞模式
+                    if (isStreamingNotSupportedError(response.code, errorBody)) {
+                        android.util.Log.i(TAG, "流式输出不支持，自动回退到阻塞模式")
+                        fallbackToBlockingMode(bitmap, config, userMessage, onToken, onComplete, onError)
+                    } else {
+                        Handler(Looper.getMainLooper()).post {
+                            onError("请求失败 (HTTP ${response.code}): ${extractErrorMessage(errorBody)}")
+                        }
+                        UsageTracker.record(config.provider.name, config.modelName, "conversation", 0, 0, 0, false)
                     }
-                    UsageTracker.record(config.provider.name, config.modelName, "conversation", 0, 0, 0, false)
                     return@launch
                 }
 
                 val source = response.body?.source() ?: run {
-                    Handler(Looper.getMainLooper()).post { onError("响应为空") }
+                    response.close()
+                    Handler(Looper.getMainLooper()).post { onError("响应为空，请检查网络连接") }
                     return@launch
                 }
 
                 val accumulated = StringBuilder()
                 var lineCount = 0
+                var hasValidContent = false
 
                 while (!source.exhausted() && !call.isCancelled) {
                     val line = source.readUtf8Line() ?: break
@@ -187,7 +197,11 @@ object CloudAiClient {
                     if (line.isEmpty() || line.startsWith(":")) continue
 
                     if (line == "data: [DONE]") break
-                    if (!line.startsWith("data: ")) continue
+                    if (!line.startsWith("data: ")) {
+                        // 可能是错误信息
+                        android.util.Log.w(TAG, "SSE line: $line")
+                        continue
+                    }
 
                     val jsonStr = line.removePrefix("data: ").trim()
                     if (jsonStr.isEmpty() || jsonStr == "[DONE]") break
@@ -200,6 +214,7 @@ object CloudAiClient {
                             val contentObj = delta?.opt("content")
                             val content = if (contentObj is String) contentObj else ""
                             if (content.isNotEmpty()) {
+                                hasValidContent = true
                                 accumulated.append(content)
                                 Handler(Looper.getMainLooper()).post {
                                     onToken(accumulated.toString())
@@ -207,7 +222,7 @@ object CloudAiClient {
                             }
                         }
                     } catch (_: Exception) {
-                        // 跳过无法解析的行
+                        android.util.Log.w(TAG, "SSE解析失败: $jsonStr")
                     }
                 }
 
@@ -226,9 +241,13 @@ object CloudAiClient {
                     }
                 } else if (call.isCancelled) {
                     android.util.Log.d(TAG, "SSE 流被用户打断")
+                } else if (!hasValidContent && lineCount > 0) {
+                    // 有数据但没有有效内容，尝试回退到阻塞模式
+                    android.util.Log.e(TAG, "SSE 流无有效内容，尝试回退到阻塞模式")
+                    fallbackToBlockingMode(bitmap, config, userMessage, onToken, onComplete, onError)
                 } else {
                     Handler(Looper.getMainLooper()).post {
-                        onError("AI 未返回有效回复")
+                        onError("AI 未返回有效回复 (${lineCount}行数据)")
                     }
                 }
 
@@ -240,9 +259,9 @@ object CloudAiClient {
                 }
             } catch (e: Exception) {
                 if (!call.isCancelled) {
-                    Handler(Looper.getMainLooper()).post {
-                        onError("流式处理错误: ${e.message}")
-                    }
+                    // 其他流式处理错误，尝试回退到阻塞模式
+                    android.util.Log.e(TAG, "流式处理错误，尝试回退到阻塞模式: ${e.message}")
+                    fallbackToBlockingMode(bitmap, config, userMessage, onToken, onComplete, onError)
                 }
             }
         }
@@ -251,10 +270,62 @@ object CloudAiClient {
         return call
     }
 
+    /** 判断错误是否是因为不支持流式输出 */
+    private fun isStreamingNotSupportedError(code: Int, errorBody: String): Boolean {
+        return when (code) {
+            400, 404, 422 -> {
+                errorBody.contains("stream") ||
+                errorBody.contains("streaming") ||
+                errorBody.contains("not support") ||
+                errorBody.contains("unsupported") ||
+                errorBody.contains("invalid") ||
+                errorBody.contains("bad request")
+            }
+            else -> false
+        }
+    }
+
+    /** 回退到阻塞模式调用 */
+    private fun fallbackToBlockingMode(
+        bitmap: Bitmap?,
+        config: ProviderConfig,
+        userMessage: String,
+        onToken: (String) -> Unit,
+        onComplete: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        apiLock.lock()
+        val startTime = System.currentTimeMillis()
+        try {
+            val requestBody = buildConversationBody(config.modelName, userMessage, bitmap)
+            val response = callApi(config, requestBody)
+            val result = parseResponse(response)
+
+            if (result != null) {
+                // 阻塞模式没有流式输出，直接调用回调
+                onToken(result)
+                onComplete(result)
+            } else {
+                onError("阻塞模式也未返回有效回复")
+            }
+
+            val latency = System.currentTimeMillis() - startTime
+            val promptTokens = UsageTracker.estimateTokens(userMessage) + 200
+            val completionTokens = UsageTracker.estimateTokens(result ?: "")
+            UsageTracker.record(config.provider.name, config.modelName, "conversation", promptTokens, completionTokens, latency)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "回退到阻塞模式失败: ${e.message}")
+            onError("调用失败: ${e.message}")
+            UsageTracker.record(config.provider.name, config.modelName, "conversation", 0, 0, 0, false)
+        } finally {
+            apiLock.unlock()
+        }
+    }
+
     /** 流式调用的可取消句柄 */
     class StreamingCall {
-        internal var scope: CoroutineScope? = null
-        internal var responseRef: okhttp3.Response? = null
+        var scope: CoroutineScope? = null
+        var responseRef: Response? = null
         @Volatile var isCancelled: Boolean = false
             private set
 
@@ -394,20 +465,20 @@ object CloudAiClient {
 
         // 动态构建系统提示词
         val baseSystemPrompt = """
-你是一个游戏语音助手，名叫"小G"。你正在通过语音和玩家对话。玩家在玩王者荣耀，你能看到他的手机屏幕。
+你是一个智能语音助手，名叫"小吉"。用户正在和你进行语音对话。
 
 说话要求：
-1. 使用口语化中文，像朋友聊天一样自然
-2. 回复简洁，控制在 2-4 句话（约 30-80 字）
-3. 基于看到的屏幕画面给出建议
-4. 如果玩家问战术问题，给出具体可操作的建议
-5. 语气轻松友好，适当使用语气词（"哦""呢""吧"）
-6. 不要使用任何格式标记（不用markdown、不用编号）
+1. 用户问什么就回答什么，自然友好
+2. 回复简洁，控制在 2-4 句话
+3. 如果用户提到游戏相关问题，结合屏幕画面分析给出建议
+4. 语气轻松友好，像朋友聊天一样自然
+5. 不要强行关联到特定游戏，用户问什么都正常回答
 
 你的能力：
-- 能看到玩家屏幕上的游戏画面
-- 可以分析局势、阵容、装备、小地图
-- 给出实时战术指导
+- 能看到用户手机屏幕的画面（如果有）
+- 可以分析屏幕内容回答用户的问题
+- 如果用户问的是游戏问题，可以给出建议
+- 如果用户问其他问题，也正常回答
 """.trimIndent()
 
         val systemPrompt = buildEnhancedSystemPrompt(model, "conversation", baseSystemPrompt)
@@ -460,20 +531,20 @@ object CloudAiClient {
         val messages = JSONArray()
 
         val baseSystemPrompt = """
-你是一个游戏语音助手，名叫"小G"。你正在通过语音和玩家对话。玩家在玩王者荣耀，你能看到他的手机屏幕。
+你是一个智能语音助手，名叫"小吉"。用户正在和你进行语音对话。
 
 说话要求：
-1. 使用口语化中文，像朋友聊天一样自然
-2. 回复简洁，控制在 2-4 句话（约 30-80 字）
-3. 基于看到的屏幕画面给出建议
-4. 如果玩家问战术问题，给出具体可操作的建议
-5. 语气轻松友好，适当使用语气词（"哦""呢""吧"）
-6. 不要使用任何格式标记（不用markdown、不用编号）
+1. 用户问什么就回答什么，自然友好
+2. 回复简洁，控制在 2-4 句话
+3. 如果用户提到游戏相关问题，结合屏幕画面分析给出建议
+4. 语气轻松友好，像朋友聊天一样自然
+5. 不要强行关联到特定游戏，用户问什么都正常回答
 
 你的能力：
-- 能看到玩家屏幕上的游戏画面
-- 可以分析局势、阵容、装备、小地图
-- 给出实时战术指导
+- 能看到用户手机屏幕的画面（如果有）
+- 可以分析屏幕内容回答用户的问题
+- 如果用户问的是游戏问题，可以给出建议
+- 如果用户问其他问题，也正常回答
 """.trimIndent()
 
         val systemPrompt = buildEnhancedSystemPrompt(model, "conversation", baseSystemPrompt)
@@ -557,6 +628,16 @@ object CloudAiClient {
         if (scaled != bitmap) scaled.recycle()
 
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
+    }
+
+    /** 从 API 错误响应中提取错误信息 */
+    private fun extractErrorMessage(errorBody: String): String {
+        return try {
+            val json = JSONObject(errorBody)
+            json.optString("error", json.optString("message", errorBody.take(100)))
+        } catch (_: Exception) {
+            errorBody.take(100)
+        }
     }
 
     /** 标准化 API 地址：去掉尾部斜杠，智能处理版本路径 */

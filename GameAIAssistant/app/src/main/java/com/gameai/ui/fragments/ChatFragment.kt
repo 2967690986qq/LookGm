@@ -185,9 +185,17 @@ class ChatFragment : Fragment() {
             } else {
                 for (binding in providerConfig.models) {
                     if (binding.matches("conversation") || binding.matches("all")) {
+                        // 显示格式：模型名称 · 供应商（displayLabel仅用于显示简称，不同时显示两个名称）
                         val label = binding.displayLabel.ifBlank { binding.modelName }
+                        val displayText = if (binding.displayLabel.isNotBlank() && binding.displayLabel != binding.modelName) {
+                            // 用户自定义了显示名，显示简称和完整模型名
+                            "${label}(${binding.modelName}) · ${providerConfig.provider.displayName}"
+                        } else {
+                            // 没有自定义显示名，直接显示模型名
+                            "${binding.modelName} · ${providerConfig.provider.displayName}"
+                        }
                         options.add(ModelOption(
-                            label = "$label · ${providerConfig.provider.displayName}",
+                            label = displayText,
                             provider = providerConfig.provider,
                             providerName = providerConfig.provider.displayName,
                             modelName = binding.modelName,
@@ -345,7 +353,7 @@ class ChatFragment : Fragment() {
                 VoiceConversationEngine.State.IDLE -> "🎤 等待说话中..."
                 VoiceConversationEngine.State.LISTENING -> "🎙 正在聆听..."
                 VoiceConversationEngine.State.PROCESSING -> "🧠 AI 思考中..."
-                VoiceConversationEngine.State.SPEAKING -> "🔊 小G 正在回复..."
+                VoiceConversationEngine.State.SPEAKING -> "🔊 小吉 正在回复..."
             }
 
             // 语音激活时改变麦克风按钮颜色
