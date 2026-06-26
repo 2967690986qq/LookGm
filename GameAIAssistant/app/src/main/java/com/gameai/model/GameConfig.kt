@@ -31,6 +31,7 @@ data class GameConfig(
     val enableFloatingBall: Boolean = false,
     val floatingBallAlpha: Float = 0.8f,
     val autoStart: Boolean = false,
+    val enableBargeIn: Boolean = false,
 
     // ========== 采集参数 ==========
     val captureFps: Int = 10,
@@ -99,6 +100,7 @@ data class GameConfig(
             "enable_floating_ball" to enableFloatingBall.toString(),
             "floating_ball_alpha" to floatingBallAlpha.toString(),
             "auto_start" to autoStart.toString(),
+            "enable_barge_in" to enableBargeIn.toString(),
             "capture_fps" to captureFps.toString(),
             "jpeg_quality" to jpegQuality.toString(),
             "show_timeline" to showTimeline.toString(),
@@ -158,6 +160,7 @@ data class GameConfig(
                 enableFloatingBall = prefs["enable_floating_ball"]?.toBooleanStrictOrNull() ?: false,
                 floatingBallAlpha = prefs["floating_ball_alpha"]?.toFloatOrNull() ?: 0.8f,
                 autoStart = prefs["auto_start"]?.toBooleanStrictOrNull() ?: false,
+                enableBargeIn = prefs["enable_barge_in"]?.toBooleanStrictOrNull() ?: false,
                 captureFps = prefs["capture_fps"]?.toIntOrNull() ?: 10,
                 jpegQuality = prefs["jpeg_quality"]?.toIntOrNull() ?: 60,
                 showTimeline = prefs["show_timeline"]?.toBooleanStrictOrNull() ?: true,

@@ -40,6 +40,8 @@ class PreferencesManager(context: Context) {
     fun getCaptureFps(): Int = kv.decodeInt("capture_fps", 10)
     fun getJpegQuality(): Int = kv.decodeInt("jpeg_quality", 60)
     fun isAutoStart(): Boolean = kv.decodeBool("auto_start", false)
+    fun isBargeInEnabled(): Boolean = kv.decodeBool("enable_barge_in", false)
+    fun setBargeInEnabled(enabled: Boolean) { kv.encode("enable_barge_in", enabled) }
 
     // ========== 模型配置读取 ==========
     fun getModelMode(): ModelMode =
@@ -156,6 +158,9 @@ class PreferencesManager(context: Context) {
             android.util.Log.d("Preferences", "   → 无模型绑定，defaultVisionModel=$defaultVision")
             return if (defaultVision.isNotBlank())
                 config.copy(modelName = defaultVision)
+            // 回退：使用当前配置的模型名（兼容未在模型管理页面配置的情况）
+            else if (config.modelName.isNotBlank())
+                config.copy(modelName = config.modelName)
             else null
         }
         android.util.Log.d("Preferences", "   → 模型列表: ${config.models.map { "${it.modelName}(${it.usedFor})" }}")
@@ -163,7 +168,9 @@ class PreferencesManager(context: Context) {
         val visionBinding = config.models.firstOrNull { it.matches("vision") }
             ?: config.models.firstOrNull { it.matches("analysis") }
             ?: config.models.firstOrNull { it.matches("all") && config.provider.defaultVisionModel.isNotBlank() }
-        android.util.Log.d("Preferences", "   → 匹配结果: ${visionBinding?.modelName}")
+            // 回退：找不到专用视觉模型时，使用任意已配置的模型（兼容用户只配置了一个通用模型的情况）
+            ?: config.models.firstOrNull()
+        android.util.Log.d("Preferences", "   → 匹配结果: ${visionBinding?.modelName ?: "无（回退到第一个模型: ${config.models.firstOrNull()?.modelName}）"}")
         return if (visionBinding != null)
             config.copy(modelName = visionBinding.modelName)
         else null

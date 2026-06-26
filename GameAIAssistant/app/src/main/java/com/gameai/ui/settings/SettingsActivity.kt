@@ -187,6 +187,12 @@ class SettingsActivity : AppCompatActivity() {
         etHost.setText(currentConfig.serverHost)
         etPort.setText(currentConfig.serverPort.toString())
 
+        // 功能开关
+        findViewById<android.widget.Switch>(R.id.switch_voice).isChecked = currentConfig.enableVoice
+        findViewById<android.widget.Switch>(R.id.switch_floating_ball).isChecked = currentConfig.enableFloatingBall
+        findViewById<android.widget.Switch>(R.id.switch_auto_start).isChecked = currentConfig.autoStart
+        findViewById<android.widget.Switch>(R.id.switch_barge_in).isChecked = currentConfig.enableBargeIn
+
         // 游戏
         val gameNames = com.gameai.common.constants.GameConstants.SUPPORTED_GAMES.keys.toList()
         val gameAdapter = ArrayAdapter(this, R.layout.item_spinner_selected, gameNames).also {
@@ -263,7 +269,11 @@ class SettingsActivity : AppCompatActivity() {
             localModelName = etLocalModel.text.toString().trim(),
             customBaseUrl = etCustomBaseUrl.text.toString().trim(),
             customApiKey = etCustomApiKey.text.toString().trim(),
-            customModelName = etCustomModelName.text.toString().trim()
+            customModelName = etCustomModelName.text.toString().trim(),
+            enableVoice = findViewById<android.widget.Switch>(R.id.switch_voice).isChecked,
+            enableFloatingBall = findViewById<android.widget.Switch>(R.id.switch_floating_ball).isChecked,
+            autoStart = findViewById<android.widget.Switch>(R.id.switch_auto_start).isChecked,
+            enableBargeIn = findViewById<android.widget.Switch>(R.id.switch_barge_in).isChecked
         )
 
         prefs.saveConfig(newConfig)
