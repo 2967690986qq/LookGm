@@ -14,7 +14,7 @@ android {
         applicationId "com.gameai.assistant"
         minSdk 24
         targetSdk 34
-        versionCode 2026062701
+        versionCode 2026062702
         versionName "20260627"
         
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"

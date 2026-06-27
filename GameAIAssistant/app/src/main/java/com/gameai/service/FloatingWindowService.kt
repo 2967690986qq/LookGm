@@ -317,128 +317,144 @@ class FloatingWindowService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        prefs = PreferencesManager.getInstance(this)
-
-        // ===== 前台通知（Android 8.0+，防止系统杀进程）=====
-        createNotificationChannel()
-        startForegroundNotification()
-
-        // ===== 后台状态恢复：如果之前语音对话正在进行，自动恢复 =====
         try {
-            checkAndRestoreVoiceConversation()
-        } catch (e: Exception) {
-            android.util.Log.e("FloatingWindow", "恢复语音对话失败", e)
-        }
+            windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+            prefs = PreferencesManager.getInstance(this)
 
-        // 注册评分广播接收器（来自 GameStateManager）
-        scoreReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                when (intent?.action) {
-                    ACTION_UPDATE_SCORE -> {
-                        currentScore = intent.getIntExtra(EXTRA_SCORE, 0)
-                        currentGrade = intent.getStringExtra(EXTRA_GRADE) ?: "B"
-                        currentFps = intent.getIntExtra(EXTRA_FPS, 0)
-                        refreshUI()
-                        refreshMatchInfo()
-                    }
-                    ACTION_UPDATE_ANALYSIS -> {
-                        currentAnalysis = intent.getStringExtra(EXTRA_ANALYSIS)
-                        refreshAiAnalysis()
-                    }
-                    // 视觉分析结果
-                    VisionAnalysisEngine.ACTION_VISION_ANALYSIS -> {
-                        currentVisionAnalysis = intent.getStringExtra(VisionAnalysisEngine.EXTRA_VISION_RESULT)
-                        refreshAiAnalysis()
-                    }
-                    // 语音对话消息 → 更新球内文字
-                    VoiceConversationEngine.ACTION_VOICE_MESSAGE -> {
-                        val role = intent.getStringExtra(VoiceConversationEngine.EXTRA_ROLE) ?: ""
-                        val text = intent.getStringExtra(VoiceConversationEngine.EXTRA_TEXT) ?: ""
-                        updateBallVoiceText(role, text)
-                    }
-                    // 语音对话状态变化
-                    VoiceConversationEngine.ACTION_VOICE_STATE -> {
-                        updateVoiceUI()
-                    }
-                    // 语音识别就绪
-                    VoiceConversationEngine.ACTION_VOICE_READY -> {
-                        updateVoiceUI()
-                    }
-                    // RMS 音量变化 → 脉冲动画
-                    VoiceConversationEngine.ACTION_VOICE_RMS -> {
-                        val rms = intent.getFloatExtra(VoiceConversationEngine.EXTRA_RMS, 0f)
-                        currentRms = rms
-                        updatePulseAnimation()
-                    }
-                    // 检测到语音开始
-                    VoiceConversationEngine.ACTION_VOICE_SPEECH_BEGIN -> {
-                        updateVoiceUI()
-                    }
-                    // 语音结束
-                    VoiceConversationEngine.ACTION_VOICE_SPEECH_END -> {
-                        updateVoiceUI()
-                    }
-                    // v3.0: 流式文字更新（打字效果）
-                    VoiceConversationEngine.ACTION_VOICE_STREAMING -> {
-                        val text = intent.getStringExtra(VoiceConversationEngine.EXTRA_TEXT) ?: ""
-                        val isStreaming = intent.getBooleanExtra(VoiceConversationEngine.EXTRA_STREAMING, false)
-                        if (isStreaming && text.isNotBlank()) {
-                            // 流式中：只显示最后 15 个字符
-                            updateBallVoiceText("ai_stream", text.takeLast(15))
+            // ===== 前台通知（Android 8.0+，防止系统杀进程）=====
+            try {
+                createNotificationChannel()
+                startForegroundNotification()
+            } catch (e: Exception) {
+                android.util.Log.e("FloatingWindow", "启动前台服务失败", e)
+            }
+
+            // ===== 后台状态恢复：如果之前语音对话正在进行，自动恢复 =====
+            try {
+                checkAndRestoreVoiceConversation()
+            } catch (e: Exception) {
+                android.util.Log.e("FloatingWindow", "恢复语音对话失败", e)
+            }
+
+            // 注册评分广播接收器（来自 GameStateManager）
+            scoreReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    try {
+                        when (intent?.action) {
+                            ACTION_UPDATE_SCORE -> {
+                                currentScore = intent.getIntExtra(EXTRA_SCORE, 0)
+                                currentGrade = intent.getStringExtra(EXTRA_GRADE) ?: "B"
+                                currentFps = intent.getIntExtra(EXTRA_FPS, 0)
+                                refreshUI()
+                                refreshMatchInfo()
+                            }
+                            ACTION_UPDATE_ANALYSIS -> {
+                                currentAnalysis = intent.getStringExtra(EXTRA_ANALYSIS)
+                                refreshAiAnalysis()
+                            }
+                            // 视觉分析结果
+                            VisionAnalysisEngine.ACTION_VISION_ANALYSIS -> {
+                                currentVisionAnalysis = intent.getStringExtra(VisionAnalysisEngine.EXTRA_VISION_RESULT)
+                                refreshAiAnalysis()
+                            }
+                            // 语音对话消息 → 更新球内文字
+                            VoiceConversationEngine.ACTION_VOICE_MESSAGE -> {
+                                val role = intent.getStringExtra(VoiceConversationEngine.EXTRA_ROLE) ?: ""
+                                val text = intent.getStringExtra(VoiceConversationEngine.EXTRA_TEXT) ?: ""
+                                updateBallVoiceText(role, text)
+                            }
+                            // 语音对话状态变化
+                            VoiceConversationEngine.ACTION_VOICE_STATE -> {
+                                updateVoiceUI()
+                            }
+                            // 语音识别就绪
+                            VoiceConversationEngine.ACTION_VOICE_READY -> {
+                                updateVoiceUI()
+                            }
+                            // RMS 音量变化 → 脉冲动画
+                            VoiceConversationEngine.ACTION_VOICE_RMS -> {
+                                val rms = intent.getFloatExtra(VoiceConversationEngine.EXTRA_RMS, 0f)
+                                currentRms = rms
+                                updatePulseAnimation()
+                            }
+                            // 检测到语音开始
+                            VoiceConversationEngine.ACTION_VOICE_SPEECH_BEGIN -> {
+                                updateVoiceUI()
+                            }
+                            // 语音结束
+                            VoiceConversationEngine.ACTION_VOICE_SPEECH_END -> {
+                                updateVoiceUI()
+                            }
+                            // v3.0: 流式文字更新（打字效果）
+                            VoiceConversationEngine.ACTION_VOICE_STREAMING -> {
+                                val text = intent.getStringExtra(VoiceConversationEngine.EXTRA_TEXT) ?: ""
+                                val isStreaming = intent.getBooleanExtra(VoiceConversationEngine.EXTRA_STREAMING, false)
+                                if (isStreaming && text.isNotBlank()) {
+                                    // 流式中：只显示最后 15 个字符
+                                    updateBallVoiceText("ai_stream", text.takeLast(15))
+                                }
+                            }
+                            // v3.0: 语音指令广播
+                            VoiceCommandHandler.ACTION_VOICE_COMMAND -> {
+                                val cmdType = intent.getStringExtra(VoiceCommandHandler.EXTRA_COMMAND_TYPE) ?: ""
+                                val cmdParam = intent.getStringExtra(VoiceCommandHandler.EXTRA_COMMAND_PARAM) ?: ""
+                                updateBallVoiceText("command", "✅ $cmdType")
+                            }
                         }
-                    }
-                    // v3.0: 语音指令广播
-                    VoiceCommandHandler.ACTION_VOICE_COMMAND -> {
-                        val cmdType = intent.getStringExtra(VoiceCommandHandler.EXTRA_COMMAND_TYPE) ?: ""
-                        val cmdParam = intent.getStringExtra(VoiceCommandHandler.EXTRA_COMMAND_PARAM) ?: ""
-                        updateBallVoiceText("command", "✅ $cmdType")
+                    } catch (e: Exception) {
+                        android.util.Log.e("FloatingWindow", "广播处理异常", e)
                     }
                 }
             }
+            val filter = IntentFilter().apply {
+                addAction(ACTION_UPDATE_SCORE)
+                addAction(ACTION_UPDATE_ANALYSIS)
+                addAction(VisionAnalysisEngine.ACTION_VISION_ANALYSIS)
+                addAction(VoiceConversationEngine.ACTION_VOICE_MESSAGE)
+                addAction(VoiceConversationEngine.ACTION_VOICE_STATE)
+                addAction(VoiceConversationEngine.ACTION_VOICE_RMS)
+                addAction(VoiceConversationEngine.ACTION_VOICE_READY)
+                addAction(VoiceConversationEngine.ACTION_VOICE_SPEECH_BEGIN)
+                addAction(VoiceConversationEngine.ACTION_VOICE_SPEECH_END)
+                addAction(VoiceConversationEngine.ACTION_VOICE_STREAMING)
+                addAction(VoiceCommandHandler.ACTION_VOICE_COMMAND)
+            }
+            LocalBroadcastManager.getInstance(this).registerReceiver(scoreReceiver!!, filter)
+        } catch (e: Exception) {
+            android.util.Log.e("FloatingWindow", "onCreate 异常", e)
         }
-        val filter = IntentFilter().apply {
-            addAction(ACTION_UPDATE_SCORE)
-            addAction(ACTION_UPDATE_ANALYSIS)
-            addAction(VisionAnalysisEngine.ACTION_VISION_ANALYSIS)
-            addAction(VoiceConversationEngine.ACTION_VOICE_MESSAGE)
-            addAction(VoiceConversationEngine.ACTION_VOICE_STATE)
-            addAction(VoiceConversationEngine.ACTION_VOICE_RMS)
-            addAction(VoiceConversationEngine.ACTION_VOICE_READY)
-            addAction(VoiceConversationEngine.ACTION_VOICE_SPEECH_BEGIN)
-            addAction(VoiceConversationEngine.ACTION_VOICE_SPEECH_END)
-            addAction(VoiceConversationEngine.ACTION_VOICE_STREAMING)
-            addAction(VoiceCommandHandler.ACTION_VOICE_COMMAND)
-        }
-        LocalBroadcastManager.getInstance(this).registerReceiver(scoreReceiver!!, filter)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_UPDATE_SCORE -> {
-                currentScore = intent.getIntExtra(EXTRA_SCORE, 0)
-                currentGrade = intent.getStringExtra(EXTRA_GRADE) ?: "B"
-                currentFps = intent.getIntExtra(EXTRA_FPS, 0)
-                refreshUI()
+        try {
+            when (intent?.action) {
+                ACTION_UPDATE_SCORE -> {
+                    currentScore = intent.getIntExtra(EXTRA_SCORE, 0)
+                    currentGrade = intent.getStringExtra(EXTRA_GRADE) ?: "B"
+                    currentFps = intent.getIntExtra(EXTRA_FPS, 0)
+                    refreshUI()
+                }
+                ACTION_UPDATE_LANE -> {
+                    currentLane = intent.getStringExtra(EXTRA_LANE) ?: ""
+                    currentHero = intent.getStringExtra(EXTRA_HERO) ?: ""
+                    highlightLane(currentLane)
+                    refreshMatchInfo()
+                    showLaneTasks(currentLane)
+                }
+                ACTION_UPDATE_ANALYSIS -> {
+                    currentAnalysis = intent.getStringExtra(EXTRA_ANALYSIS)
+                    refreshAiAnalysis()
+                }
+                ACTION_HIDE -> destroyWindows()
+                ACTION_SHOW -> {
+                    if (!isShowing) createWindows()
+                }
+                else -> {
+                    if (!isShowing) createWindows()
+                }
             }
-            ACTION_UPDATE_LANE -> {
-                currentLane = intent.getStringExtra(EXTRA_LANE) ?: ""
-                currentHero = intent.getStringExtra(EXTRA_HERO) ?: ""
-                highlightLane(currentLane)
-                refreshMatchInfo()
-                showLaneTasks(currentLane)
-            }
-            ACTION_UPDATE_ANALYSIS -> {
-                currentAnalysis = intent.getStringExtra(EXTRA_ANALYSIS)
-                refreshAiAnalysis()
-            }
-            ACTION_HIDE -> destroyWindows()
-            ACTION_SHOW -> {
-                if (!isShowing) createWindows()
-            }
-            else -> {
-                if (!isShowing) createWindows()
-            }
+        } catch (e: Exception) {
+            android.util.Log.e("FloatingWindow", "onStartCommand 异常", e)
         }
         return START_STICKY
     }
@@ -458,7 +474,9 @@ class FloatingWindowService : Service() {
             }
             isShowing = true
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("FloatingWindow", "创建悬浮窗失败", e)
+            isShowing = false
+            Toast.makeText(this, "悬浮窗创建失败：${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -483,11 +501,15 @@ class FloatingWindowService : Service() {
         // 麦克风按钮 → 启动/停止语音对话
         btnMic = ballView?.findViewById(R.id.btn_mic)
         btnMic?.setOnClickListener {
-            if (!VoiceConversationEngine.isConversationActive()) {
-                startVoiceConversation()
-            } else {
-                VoiceConversationEngine.stopConversation()
-                updateVoiceUI()
+            try {
+                if (!VoiceConversationEngine.isConversationActive()) {
+                    startVoiceConversation()
+                } else {
+                    VoiceConversationEngine.stopConversation()
+                    updateVoiceUI()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("FloatingWindow", "麦克风按钮点击异常", e)
             }
         }
 

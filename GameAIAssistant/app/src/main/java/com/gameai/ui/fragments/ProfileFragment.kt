@@ -28,6 +28,7 @@ import com.gameai.ui.GitHubOAuthActivity
 import com.gameai.ui.LoginActivity
 import com.gameai.utils.GitHubAuthManager
 import com.gameai.utils.PreferencesManager
+import com.gameai.utils.RomCompatHelper
 import com.gameai.utils.UpdateManager
 import com.gameai.viewmodel.MainViewModel
 import java.text.SimpleDateFormat
@@ -211,33 +212,21 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
             val config = prefs.loadConfig()
             prefs.saveConfig(config.copy(enableFloatingBall = isChecked))
             if (isChecked) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(requireContext())) {
-                    MaterialAlertDialogBuilder(requireContext())
-                        .setTitle("需要悬浮窗权限")
-                        .setMessage("开启悬浮球需要在系统设置中授予「显示在其他应用上层」权限，点击确定跳转设置。")
-                        .setPositiveButton("去设置") { _, _ ->
-                            startActivity(Intent(
-                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                Uri.parse("package:${requireContext().packageName}")
-                            ))
-                        }
-                        .setNegativeButton("取消") { _, _ ->
-                            binding.switchOverlay.setOnCheckedChangeListener(null)
-                            binding.switchOverlay.isChecked = false
-                            prefs.saveConfig(config.copy(enableFloatingBall = false))
-                            setupClickListeners()
-                        }
-                        .show()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !canDrawOverlaysCompat(requireContext())) {
+                    showFloatingPermissionDialog()
                 } else {
-                    requireContext().startService(Intent(requireContext(), FloatingWindowService::class.java))
-                    Toast.makeText(requireContext(), "悬浮窗已开启", Toast.LENGTH_SHORT).show()
+                    startFloatingServiceSafely()
                 }
             } else {
                 val stopIntent = Intent(requireContext(), FloatingWindowService::class.java).apply {
                     action = FloatingWindowService.ACTION_HIDE
                 }
-                requireContext().startService(stopIntent)
-                requireContext().stopService(Intent(requireContext(), FloatingWindowService::class.java))
+                try {
+                    requireContext().startService(stopIntent)
+                    requireContext().stopService(Intent(requireContext(), FloatingWindowService::class.java))
+                } catch (e: Exception) {
+                    android.util.Log.e("ProfileFragment", "停止悬浮窗服务失败", e)
+                }
             }
         }
 
@@ -376,6 +365,120 @@ class ProfileFragment : Fragment(R.layout.fragment_profile) {
             Toast.makeText(requireContext(), "正在打开授权页面...", Toast.LENGTH_SHORT).show()
             val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl))
             startActivity(browserIntent)
+        }
+    }
+
+    private fun canDrawOverlaysCompat(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                Settings.canDrawOverlays(context)
+            } catch (e: Exception) {
+                android.util.Log.w("ProfileFragment", "检查悬浮窗权限异常，假设未授权", e)
+                false
+            }
+        } else {
+            true
+        }
+    }
+
+    private fun showFloatingPermissionDialog() {
+        val romGuide = RomCompatHelper.getRomGuide(requireContext())
+        val message = buildString {
+            append("开启悬浮球需要授予「显示在其他应用上层」权限。\n\n")
+            append("检测到系统：${romGuide.name}\n")
+            append("操作路径：${romGuide.floatingWindowGuide}\n\n")
+            append("点击下方按钮跳转系统设置页面开启权限。")
+        }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("需要悬浮窗权限")
+            .setMessage(message)
+            .setPositiveButton("去系统设置") { _, _ ->
+                openOverlayPermissionSettings()
+            }
+            .setNegativeButton("取消") { _, _ ->
+                binding.switchOverlay.setOnCheckedChangeListener(null)
+                binding.switchOverlay.isChecked = false
+                val config = prefs.loadConfig()
+                prefs.saveConfig(config.copy(enableFloatingBall = false))
+                setupClickListeners()
+            }
+            .show()
+    }
+
+    private fun openOverlayPermissionSettings() {
+        val ctx = requireContext()
+        var opened = false
+        try {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:${ctx.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            opened = true
+        } catch (e: Exception) {
+            android.util.Log.w("ProfileFragment", "跳转标准悬浮窗设置失败，尝试 ROM 特定路径", e)
+        }
+        if (!opened) {
+            try {
+                val romGuide = RomCompatHelper.getRomGuide(ctx)
+                val pkg = ctx.packageName
+                val romType = RomCompatHelper.detectRomType()
+                val intent = when (romType) {
+                    RomCompatHelper.RomType.MIUI -> Intent().apply {
+                        component = android.content.ComponentName(
+                            "com.miui.securitycenter",
+                            "com.miui.permcenter.permissions.PermissionsEditorActivity"
+                        )
+                        putExtra("extra_pkgname", pkg)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    RomCompatHelper.RomType.EMUI -> Intent().apply {
+                        component = android.content.ComponentName(
+                            "com.huawei.systemmanager",
+                            "com.huawei.permissionmanager.ui.MainActivity"
+                        )
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    else -> null
+                }
+                if (intent != null) {
+                    startActivity(intent)
+                    opened = true
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("ProfileFragment", "跳转 ROM 悬浮窗设置失败", e)
+            }
+        }
+        if (!opened) {
+            try {
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:${ctx.packageName}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "请手动在系统设置中开启悬浮窗权限", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun startFloatingServiceSafely() {
+        try {
+            val ctx = requireContext()
+            val intent = Intent(ctx, FloatingWindowService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent)
+            } else {
+                ctx.startService(intent)
+            }
+            Toast.makeText(ctx, "悬浮窗已开启", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            android.util.Log.e("ProfileFragment", "启动悬浮窗服务失败", e)
+            Toast.makeText(requireContext(), "悬浮窗开启失败：${e.message}", Toast.LENGTH_LONG).show()
+            binding.switchOverlay.setOnCheckedChangeListener(null)
+            binding.switchOverlay.isChecked = false
+            val config = prefs.loadConfig()
+            prefs.saveConfig(config.copy(enableFloatingBall = false))
+            setupClickListeners()
         }
     }
 
