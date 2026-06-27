@@ -72,12 +72,12 @@ object UpdateManager {
     }
 
     fun checkManually(context: Context) {
-        checkForUpdate(context.applicationContext, silent = false)
+        checkForUpdate(context.applicationContext, silent = false, dialogCtx = context)
     }
 
     // ===== 核心检测逻辑 =====
 
-    private fun checkForUpdate(appCtx: Context, silent: Boolean) {
+    private fun checkForUpdate(appCtx: Context, silent: Boolean, dialogCtx: Context? = null) {
         checkJob?.cancel()
         checkJob = CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -115,7 +115,7 @@ object UpdateManager {
                 }
 
                 mainHandler.post {
-                    showUpdateDialog(appCtx, latest, currentVersion)
+                    showUpdateDialog(dialogCtx ?: appCtx, latest, currentVersion)
                 }
 
             } catch (e: Exception) {
@@ -177,7 +177,7 @@ object UpdateManager {
 
     // ===== 更新提示对话框 =====
 
-    private fun showUpdateDialog(appCtx: Context, release: ReleaseInfo, currentVersion: String) {
+    private fun showUpdateDialog(ctx: Context, release: ReleaseInfo, currentVersion: String) {
         val betaBadge = if (release.isBeta) "【Beta】" else "【正式版】"
         val title = "发现新版本 $betaBadge"
 
@@ -187,36 +187,37 @@ object UpdateManager {
         val dateStr = release.publishedAt.take(10)  // "2026-06-25"
         val msg = "最新版本：${release.versionName}\n当前版本：$currentVersion\n发布日期：$dateStr\n\n更新内容：\n$cleanBody"
 
-        // ★ 必须使用 Application Context + 系统级窗口类型，避免在 Service 中崩溃
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            AlertDialog.Builder(appCtx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-        } else {
-            AlertDialog.Builder(appCtx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-        }
+        val builder = AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
 
         val dialog = builder
             .setTitle(title)
             .setMessage(msg)
             .setCancelable(false)
             .setPositiveButton("立即更新") { _, _ ->
-                startDownload(appCtx, release)
+                startDownload(ctx, release)
             }
             .setNeutralButton("稍后提醒") { _, _ ->
-                Toast.makeText(appCtx, "将在下次启动时再次提醒", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, "将在下次启动时再次提醒", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("忽略此版本") { _, _ ->
-                appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     .edit().putString(KEY_IGNORED_VERSION, release.versionName).apply()
-                Toast.makeText(appCtx, "已忽略版本 ${release.versionName}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, "已忽略版本 ${release.versionName}", Toast.LENGTH_SHORT).show()
             }
             .create()
 
-        // ★ 在 Service / Application Context 弹窗必须设置 TYPE_APPLICATION_OVERLAY
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
-        } else {
-            @Suppress("DEPRECATION")
-            dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_SYSTEM_ALERT)
+        // ★ 仅当 Context 不是 Activity 时才需要 overlay 权限（Service/自动检查场景）
+        if (ctx !is Activity) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+                } else {
+                    @Suppress("DEPRECATION")
+                    dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_SYSTEM_ALERT)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "无法设置overlay窗口类型，回退到Activity模式", e)
+            }
         }
 
         dialog.show()
@@ -246,6 +247,7 @@ object UpdateManager {
 
     fun startDownload(context: Context, release: ReleaseInfo) {
         val appCtx = context.applicationContext
+        val dialogCtx = context  // 保留原始Context用于弹窗
         createDownloadChannel(appCtx)
 
         val notificationManager = appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -288,7 +290,7 @@ object UpdateManager {
                 notificationManager.notify(DOWNLOAD_NOTIFY_ID, notifBuilder.build())
 
                 mainHandler.post {
-                    showInstallDialog(appCtx, apkFile, release)
+                    showInstallDialog(dialogCtx, apkFile, release)
                 }
 
             } catch (e: Exception) {
@@ -375,24 +377,31 @@ object UpdateManager {
         return apkFile
     }
 
-    private fun showInstallDialog(appCtx: Context, apkFile: File, release: ReleaseInfo) {
-        val dialog = AlertDialog.Builder(appCtx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+    private fun showInstallDialog(ctx: Context, apkFile: File, release: ReleaseInfo) {
+        val dialog = AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("下载完成，立即安装？")
             .setMessage("LookGm ${release.versionName} 已下载完成\n文件大小：${apkFile.length() / 1024 / 1024} MB")
             .setCancelable(false)
             .setPositiveButton("立即安装") { _, _ ->
-                installApk(appCtx, apkFile)
+                installApk(ctx, apkFile)
             }
             .setNegativeButton("稍后") { _, _ ->
-                Toast.makeText(appCtx, "可在通知栏点击安装", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, "可在通知栏点击安装", Toast.LENGTH_SHORT).show()
             }
             .create()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
-        } else {
-            @Suppress("DEPRECATION")
-            dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_SYSTEM_ALERT)
+        // ★ 仅当 Context 不是 Activity 时才需要 overlay 权限
+        if (ctx !is Activity) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+                } else {
+                    @Suppress("DEPRECATION")
+                    dialog.window?.setType(android.view.WindowManager.LayoutParams.TYPE_SYSTEM_ALERT)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "无法设置overlay窗口类型", e)
+            }
         }
 
         dialog.show()
@@ -401,6 +410,9 @@ object UpdateManager {
     private fun installApk(context: Context, apkFile: File) {
         try {
             val intent = buildInstallIntent(context, apkFile)
+            if (context !is Activity) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             context.startActivity(intent)
         } catch (e: Exception) {
             Log.e(TAG, "安装失败: ${e.message}", e)

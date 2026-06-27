@@ -184,7 +184,11 @@ object VoiceConversationEngine {
         // 初始化技能系统
         SkillManager.init(ctx)
         kotlinx.coroutines.GlobalScope.launch {
-            SkillManager.importBuiltinSkills()
+            try {
+                SkillManager.importBuiltinSkills()
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "导入内置技能失败", e)
+            }
         }
 
         // 设置当前游戏上下文（同步技能系统）

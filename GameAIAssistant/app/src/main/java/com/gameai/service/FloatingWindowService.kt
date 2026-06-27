@@ -325,7 +325,11 @@ class FloatingWindowService : Service() {
         startForegroundNotification()
 
         // ===== 后台状态恢复：如果之前语音对话正在进行，自动恢复 =====
-        checkAndRestoreVoiceConversation()
+        try {
+            checkAndRestoreVoiceConversation()
+        } catch (e: Exception) {
+            android.util.Log.e("FloatingWindow", "恢复语音对话失败", e)
+        }
 
         // 注册评分广播接收器（来自 GameStateManager）
         scoreReceiver = object : BroadcastReceiver() {
@@ -1000,7 +1004,11 @@ class FloatingWindowService : Service() {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     // =================================================================
